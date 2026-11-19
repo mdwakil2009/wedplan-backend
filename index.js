@@ -28,6 +28,31 @@ const servicesCollection = db.collection("services");
 app.get("/", (req, res) => {
   res.json({ message: "WedPlan server is running 🎉" });
 });
+// Add Service API
+app.post("/services", async (req, res) => {
+  try {
+    const serviceData = req.body;
+    const result = await servicesCollection.insertOne(serviceData);
+
+    res.send({
+      success: true,
+      message: "Service added successfully!",
+      insertedId: result.insertedId,
+    });
+  } catch (error) {
+    console.log(error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to add service",
+    });
+  }
+});
+app.get("/services", async(req, res) => {
+  const services = await servicesCollection.find().toArray()
+
+  res.send(services);
+});
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);

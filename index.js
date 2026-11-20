@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
 
 const app = express();
@@ -30,7 +30,6 @@ app.get("/", (req, res) => {
 });
 // Add Service API
 app.post("/services", async (req, res) => {
-  try {
     const serviceData = req.body;
     const result = await servicesCollection.insertOne(serviceData);
 
@@ -39,21 +38,41 @@ app.post("/services", async (req, res) => {
       message: "Service added successfully!",
       insertedId: result.insertedId,
     });
-  } catch (error) {
-    console.log(error);
-
-    res.status(500).send({
-      success: false,
-      message: "Failed to add service",
-    });
-  }
-});
+  })
 app.get("/services", async(req, res) => {
   const services = await servicesCollection.find().toArray()
 
   res.send(services);
 });
+// Get services by user email
+app.get("/my-services", async (req, res) => {
+  const email = req.query.email;
+  const result = await servicesCollection.find({ userEmail:email }).toArray();
 
+  res.send(result);
+});
+
+// Update Service
+app.patch("/services/:id", async (req, res) => {
+  const id = req.params.id;
+  const updatedService = req.body;
+
+  const result = await servicesCollection.updateOne(
+    { _id: new ObjectId(id) },
+    {
+      $set: {
+        serviceName: updatedService.serviceName,
+        category: updatedService.category,
+        price: updatedService.price,
+        location: updatedService.location,
+        description: updatedService.description,
+        images: updatedService.images,
+      },
+    }
+  );
+
+  res.send(result);
+});
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });

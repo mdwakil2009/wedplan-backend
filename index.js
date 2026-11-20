@@ -73,6 +73,19 @@ app.patch("/services/:id", async (req, res) => {
 
   res.send(result);
 });
+// Delete Service
+app.delete("/services/:id", async (req, res) => {
+  const id = req.params.id;
+  const result = await servicesCollection.deleteOne({
+    _id: new ObjectId(id),
+  });
+
+  res.send({
+    success: true,
+    message: "Service deleted successfully!",
+    deletedCount: result.deletedCount,
+  });
+});
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });

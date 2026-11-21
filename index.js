@@ -23,8 +23,10 @@ export async function connectToMongoDB() {
 
 const connectedClient = await connectToMongoDB();
 const db = connectedClient.db("WedPlan");
+
 const servicesCollection = db.collection("services");
 const bookingsCollection = db.collection("bookings");
+const usersCollection = db.collection("user");
 
 app.get("/", (req, res) => {
   res.json({ message: "WedPlan server is running 🎉" });
@@ -117,6 +119,31 @@ app.post("/bookings", async (req, res) => {
     message: "Booking successful!",
     insertedId: result.insertedId,
   });
+});
+//vendor-bookings 
+app.get("/vendor-bookings", async (req, res) => {
+  const vendorId = req.query.vendorId;
+
+  const bookings = await bookingsCollection
+    .find({ vendorId: vendorId })
+    .toArray();
+
+  res.send(bookings);
+});
+//user info
+app.get("/users/:id", async (req, res) => {
+  const user = await usersCollection.findOne(
+    { _id: new ObjectId(req.params.id) },
+    {
+      projection: {
+        name: 1,
+        email: 1,
+        image: 1,
+      },
+    }
+  );
+
+  res.send(user);
 });
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);

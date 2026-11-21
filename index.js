@@ -24,6 +24,7 @@ export async function connectToMongoDB() {
 const connectedClient = await connectToMongoDB();
 const db = connectedClient.db("WedPlan");
 const servicesCollection = db.collection("services");
+const bookingsCollection = db.collection("bookings");
 
 app.get("/", (req, res) => {
   res.json({ message: "WedPlan server is running 🎉" });
@@ -84,6 +85,37 @@ app.delete("/services/:id", async (req, res) => {
     success: true,
     message: "Service deleted successfully!",
     deletedCount: result.deletedCount,
+  });
+});
+// Get Single Service by ID
+app.get("/services/:id", async (req, res) => {
+  const id = req.params.id;
+    const service = await servicesCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!service) {
+      return res.status(404).send({
+        message: "Service not found",
+      });
+    }
+
+    res.send(service);
+  });
+  // Create Booking API
+app.post("/bookings", async (req, res) => {
+  const bookingData = req.body;
+
+  const result = await bookingsCollection.insertOne({
+    ...bookingData,
+    status: "pending",
+    createdAt: new Date(),
+  });
+
+  res.send({
+    success: true,
+    message: "Booking successful!",
+    insertedId: result.insertedId,
   });
 });
 app.listen(PORT, () => {

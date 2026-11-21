@@ -27,6 +27,7 @@ const db = connectedClient.db("WedPlan");
 const servicesCollection = db.collection("services");
 const bookingsCollection = db.collection("bookings");
 const usersCollection = db.collection("user");
+const transactionsCollection = db.collection("transactions");
 
 app.get("/", (req, res) => {
   res.json({ message: "WedPlan server is running 🎉" });
@@ -130,6 +131,28 @@ app.get("/vendor-bookings", async (req, res) => {
 
   res.send(bookings);
 });
+app.get("/vendor-bookings-with-service", async (req, res) => {
+  const vendorId = req.query.vendorId;
+
+  const bookings = await bookingsCollection
+    .find({ vendorId })
+    .toArray();
+
+  const bookingsWithService = await Promise.all(
+    bookings.map(async (booking) => {
+      const service = await servicesCollection.findOne({
+        _id: new ObjectId(booking.serviceId),
+      });
+
+      return {
+        ...booking,
+        service,
+      };
+    })
+  );
+
+  res.send(bookingsWithService);
+});
 // Update Booking Status
 app.patch("/bookings/:id", async (req, res) => {
   const id = req.params.id;
@@ -164,6 +187,78 @@ app.get("/users/:id", async (req, res) => {
   );
 
   res.send(user);
+});
+
+//Customer Bookings API
+app.get("/customer-bookings", async (req, res) => {
+  const customerId = req.query.customerId;
+
+  const bookings = await bookingsCollection
+    .find({ customerId: customerId })
+    .toArray();
+
+  const bookingsWithDetails = await Promise.all(
+    bookings.map(async (booking) => {
+      const service = await servicesCollection.findOne({
+        _id: new ObjectId(booking.serviceId),
+      });
+
+      const vendor = await usersCollection.findOne(
+        { _id: new ObjectId(booking.vendorId) },
+        {
+          projection: {
+            name: 1,
+            email: 1,
+            image: 1,
+          },
+        }
+      );
+
+      return {
+        ...booking,
+        service,
+        vendor,
+      };
+    })
+  );
+
+  res.send(bookingsWithDetails);
+});
+
+// Admin Overview API
+app.get("/admin-overview", async (req, res) => {
+  try {
+    const totalUsers = await usersCollection.countDocuments();
+
+    const totalVendors = await usersCollection.countDocuments({
+      role: "vendor",
+    });
+
+    const totalCustomers = await usersCollection.countDocuments({
+      role: "customer",
+    });
+
+    const totalServices = await servicesCollection.countDocuments();
+
+    const pendingServices = await servicesCollection.countDocuments({
+      status: "pending",
+    });
+
+    const totalTransactions = await transactionsCollection.countDocuments();
+
+    res.send({
+      totalUsers,
+      totalVendors,
+      totalCustomers,
+      totalServices,
+      pendingServices,
+      totalTransactions,
+    });
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to fetch admin overview",
+    });
+  }
 });
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);

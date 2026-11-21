@@ -130,6 +130,26 @@ app.get("/vendor-bookings", async (req, res) => {
 
   res.send(bookings);
 });
+// Update Booking Status
+app.patch("/bookings/:id", async (req, res) => {
+  const id = req.params.id;
+  const { status } = req.body;
+
+  const result = await bookingsCollection.updateOne(
+    { _id: new ObjectId(id) },
+    {
+      $set: {
+        status: status,
+      },
+    }
+  );
+
+  res.send({
+    success: true,
+    message: "Booking status updated successfully!",
+    result,
+  });
+});
 //user info
 app.get("/users/:id", async (req, res) => {
   const user = await usersCollection.findOne(

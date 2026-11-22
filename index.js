@@ -34,19 +34,43 @@ app.get("/", (req, res) => {
 });
 // Add Service API
 app.post("/services", async (req, res) => {
-  const serviceData = req.body;
-  const result = await servicesCollection.insertOne(serviceData);
+  try {
+    const serviceData = {
+      ...req.body,
+      status: "pending",
+      isActive: false,
+      createdAt: new Date().toISOString(),
+    };
 
-  res.send({
-    success: true,
-    message: "Service added successfully!",
-    insertedId: result.insertedId,
-  });
+    const result = await servicesCollection.insertOne(serviceData);
+
+    res.send({
+      success: true,
+      message: "Service added successfully!",
+      insertedId: result.insertedId,
+    });
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to add service",
+    });
+  }
 });
+// Public - Get Approved & Active Services
 app.get("/services", async (req, res) => {
-  const services = await servicesCollection.find().toArray();
+  try {
+    const services = await servicesCollection
+      .find({
+        status: "approved",
+        isActive: true,
+      })
+      .toArray();
 
-  res.send(services);
+    res.send(services);
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to fetch services",
+    });
+  }
 });
 // Get services by user email
 app.get("/my-services", async (req, res) => {
@@ -285,12 +309,101 @@ app.patch("/admin-users/:id", async (req, res) => {
   try {
     const result = await usersCollection.updateOne(
       { _id: new ObjectId(req.params.id) },
-      { $set: { isBlocked: req.body.isBlocked } }
+      { $set: { isBlocked: req.body.isBlocked } },
     );
 
     res.send({ success: result.modifiedCount > 0 });
   } catch (error) {
     res.status(500).send({ message: "Failed to update user" });
+  }
+});
+// Admin - Get All Services
+app.get("/admin-services", async (req, res) => {
+  try {
+    const services = await servicesCollection.find({}).toArray();
+
+    res.status(200).send(services);
+  } catch (error) {
+    console.error("Admin services error:", error);
+    res.status(500).send({
+      message: "Failed to fetch admin services",
+    });
+  }
+});
+// Admin - Update Service Status
+app.patch("/admin-services/:id/status", async (req, res) => {
+  try {
+    const { status } = req.body;
+
+    if (!["pending", "approved", "rejected"].includes(status)) {
+      return res.status(400).send({
+        message: "Invalid status",
+      });
+    }
+
+    const updateData = { status };
+
+    // Rejected service automatically inactive হবে
+    if (status === "rejected") {
+      updateData.isActive = false;
+    }
+
+    const result = await servicesCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: updateData },
+    );
+
+    if (!result.matchedCount) {
+      return res.status(404).send({
+        message: "Service not found",
+      });
+    }
+
+    res.send({
+      success: true,
+      message: "Service status updated successfully",
+    });
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to update service status",
+    });
+  }
+});
+// Admin - Update Service Active Status
+app.patch("/admin-services/:id/active", async (req, res) => {
+  try {
+    const { isActive } = req.body;
+
+    if (typeof isActive !== "boolean") {
+      return res.status(400).send({
+        message: "Invalid active status",
+      });
+    }
+
+    const result = await servicesCollection.updateOne(
+      {
+        _id: new ObjectId(req.params.id),
+        status: "approved",
+      },
+      {
+        $set: { isActive },
+      },
+    );
+
+    if (!result.matchedCount) {
+      return res.status(404).send({
+        message: "Approved service not found",
+      });
+    }
+
+    res.send({
+      success: true,
+      message: "Service availability updated successfully",
+    });
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to update service availability",
+    });
   }
 });
 app.listen(PORT, () => {

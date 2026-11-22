@@ -35,6 +35,28 @@ app.get("/", (req, res) => {
 // Add Service API
 app.post("/services", async (req, res) => {
   try {
+    const { vendorId } = req.body;
+
+    const vendor = await usersCollection.findOne({
+      _id: new ObjectId(vendorId),
+    });
+
+    if (!vendor) {
+      return res.status(404).send({ message: "Vendor not found" });
+    }
+
+    if (vendor.subscriptionPlan !== "premium") {
+      const count = await servicesCollection.countDocuments({ vendorId });
+
+      if (count >= 3) {
+        return res.status(403).send({
+          success: false,
+          limitReached: true,
+          message: "Free plan limit reached! Upgrade to Premium.",
+        });
+      }
+    }
+
     const serviceData = {
       ...req.body,
       status: "pending",
@@ -50,9 +72,7 @@ app.post("/services", async (req, res) => {
       insertedId: result.insertedId,
     });
   } catch (error) {
-    res.status(500).send({
-      message: "Failed to add service",
-    });
+    res.status(500).send({ message: "Failed to add service" });
   }
 });
 // Public - Get Approved & Active Services
@@ -195,22 +215,36 @@ app.patch("/bookings/:id", async (req, res) => {
     result,
   });
 });
-//user info
+// Get User Info
 app.get("/users/:id", async (req, res) => {
-  const user = await usersCollection.findOne(
-    { _id: new ObjectId(req.params.id) },
-    {
-      projection: {
-        name: 1,
-        email: 1,
-        image: 1,
+  try {
+    const user = await usersCollection.findOne(
+      { _id: new ObjectId(req.params.id) },
+      {
+        projection: {
+          name: 1,
+          email: 1,
+          image: 1,
+          role: 1,
+          subscriptionPlan: 1,
+          subscriptionExpiresAt: 1,
+        },
       },
-    },
-  );
+    );
 
-  res.send(user);
+    if (!user) {
+      return res.status(404).send({
+        message: "User not found",
+      });
+    }
+
+    res.send(user);
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to fetch user",
+    });
+  }
 });
-
 //Customer Bookings API
 app.get("/customer-bookings", async (req, res) => {
   const customerId = req.query.customerId;

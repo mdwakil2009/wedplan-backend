@@ -34,24 +34,24 @@ app.get("/", (req, res) => {
 });
 // Add Service API
 app.post("/services", async (req, res) => {
-    const serviceData = req.body;
-    const result = await servicesCollection.insertOne(serviceData);
+  const serviceData = req.body;
+  const result = await servicesCollection.insertOne(serviceData);
 
-    res.send({
-      success: true,
-      message: "Service added successfully!",
-      insertedId: result.insertedId,
-    });
-  })
-app.get("/services", async(req, res) => {
-  const services = await servicesCollection.find().toArray()
+  res.send({
+    success: true,
+    message: "Service added successfully!",
+    insertedId: result.insertedId,
+  });
+});
+app.get("/services", async (req, res) => {
+  const services = await servicesCollection.find().toArray();
 
   res.send(services);
 });
 // Get services by user email
 app.get("/my-services", async (req, res) => {
   const email = req.query.email;
-  const result = await servicesCollection.find({ userEmail:email }).toArray();
+  const result = await servicesCollection.find({ userEmail: email }).toArray();
 
   res.send(result);
 });
@@ -72,7 +72,7 @@ app.patch("/services/:id", async (req, res) => {
         description: updatedService.description,
         images: updatedService.images,
       },
-    }
+    },
   );
 
   res.send(result);
@@ -93,19 +93,19 @@ app.delete("/services/:id", async (req, res) => {
 // Get Single Service by ID
 app.get("/services/:id", async (req, res) => {
   const id = req.params.id;
-    const service = await servicesCollection.findOne({
-      _id: new ObjectId(id),
-    });
-
-    if (!service) {
-      return res.status(404).send({
-        message: "Service not found",
-      });
-    }
-
-    res.send(service);
+  const service = await servicesCollection.findOne({
+    _id: new ObjectId(id),
   });
-  // Create Booking API
+
+  if (!service) {
+    return res.status(404).send({
+      message: "Service not found",
+    });
+  }
+
+  res.send(service);
+});
+// Create Booking API
 app.post("/bookings", async (req, res) => {
   const bookingData = req.body;
 
@@ -121,7 +121,7 @@ app.post("/bookings", async (req, res) => {
     insertedId: result.insertedId,
   });
 });
-//vendor-bookings 
+//vendor-bookings
 app.get("/vendor-bookings", async (req, res) => {
   const vendorId = req.query.vendorId;
 
@@ -134,9 +134,7 @@ app.get("/vendor-bookings", async (req, res) => {
 app.get("/vendor-bookings-with-service", async (req, res) => {
   const vendorId = req.query.vendorId;
 
-  const bookings = await bookingsCollection
-    .find({ vendorId })
-    .toArray();
+  const bookings = await bookingsCollection.find({ vendorId }).toArray();
 
   const bookingsWithService = await Promise.all(
     bookings.map(async (booking) => {
@@ -148,7 +146,7 @@ app.get("/vendor-bookings-with-service", async (req, res) => {
         ...booking,
         service,
       };
-    })
+    }),
   );
 
   res.send(bookingsWithService);
@@ -164,7 +162,7 @@ app.patch("/bookings/:id", async (req, res) => {
       $set: {
         status: status,
       },
-    }
+    },
   );
 
   res.send({
@@ -183,7 +181,7 @@ app.get("/users/:id", async (req, res) => {
         email: 1,
         image: 1,
       },
-    }
+    },
   );
 
   res.send(user);
@@ -211,7 +209,7 @@ app.get("/customer-bookings", async (req, res) => {
             email: 1,
             image: 1,
           },
-        }
+        },
       );
 
       return {
@@ -219,7 +217,7 @@ app.get("/customer-bookings", async (req, res) => {
         service,
         vendor,
       };
-    })
+    }),
   );
 
   res.send(bookingsWithDetails);
@@ -258,6 +256,41 @@ app.get("/admin-overview", async (req, res) => {
     res.status(500).send({
       message: "Failed to fetch admin overview",
     });
+  }
+});
+
+// Admin Manage Users API
+app.get("/admin-users", async (req, res) => {
+  try {
+    const users = await usersCollection
+      .find({})
+      .project({
+        name: 1,
+        email: 1,
+        image: 1,
+        role: 1,
+        createdAt: 1,
+        isBlocked: 1,
+      })
+      .toArray();
+
+    res.send(users);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to fetch users" });
+  }
+});
+
+// Block / Unblock User
+app.patch("/admin-users/:id", async (req, res) => {
+  try {
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { isBlocked: req.body.isBlocked } }
+    );
+
+    res.send({ success: result.modifiedCount > 0 });
+  } catch (error) {
+    res.status(500).send({ message: "Failed to update user" });
   }
 });
 app.listen(PORT, () => {

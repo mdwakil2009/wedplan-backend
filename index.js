@@ -2,12 +2,106 @@ import express from "express";
 import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
+import Stripe from "stripe";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+// CORS middleware
 app.use(cors());
+
+// Stripe Webhook
+app.post(
+  "/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    console.log("Webhook request received!");
+
+    const signature = req.headers["stripe-signature"];
+
+    let event;
+
+    // Verify Stripe signature
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        signature,
+        process.env.STRIPE_WEBHOOK_SECRET,
+      );
+    } catch (error) {
+      console.error("Webhook Signature Error:", error.message);
+
+      return res.status(400).send("Invalid signature");
+    }
+
+    try {
+      // Handle successful payment
+      if (event.type === "checkout.session.completed") {
+        const session = event.data.object;
+
+        console.log("Checkout Session:", session.id);
+
+        if (session.payment_status !== "paid") {
+          return res.json({ received: true });
+        }
+
+        const userId = session.metadata?.userId;
+        console.log("Session Metadata:", session.metadata);
+
+        if (!userId || !ObjectId.isValid(userId)) {
+          console.log("Invalid User ID:", userId);
+
+          return res.status(400).send("Invalid user ID");
+        }
+
+        // Activate Premium
+        const userResult = await usersCollection.updateOne(
+          { _id: new ObjectId(userId) },
+          {
+            $set: {
+              subscriptionPlan: "premium",
+            },
+          },
+        );
+
+        if (userResult.matchedCount === 0) {
+          return res.status(404).send("Vendor not found");
+        }
+
+        // Save transaction
+        await transactionsCollection.updateOne(
+          { stripeSessionId: session.id },
+          {
+            $setOnInsert: {
+              vendorId: userId,
+              plan: "premium",
+              amount: (session.amount_total || 0) / 100,
+              currency: session.currency,
+              stripeSessionId: session.id,
+              paymentIntentId: session.payment_intent,
+              status: "paid",
+              createdAt: new Date(session.created * 1000),
+            },
+          },
+          { upsert: true },
+        );
+
+        console.log("Premium activated:", userId);
+      }
+
+      return res.json({ received: true });
+    } catch (error) {
+      console.error("Webhook Processing Error:", error);
+
+      return res.status(500).send("Webhook processing failed");
+    }
+  },
+);
+
+// JSON middleware MUST be after webhook
 app.use(express.json());
+
 
 const client = new MongoClient(process.env.MONGODB_URL);
 
@@ -74,7 +168,7 @@ app.post("/services", async (req, res) => {
   } catch (error) {
     res.status(500).send({ message: "Failed to add service" });
   }
-});
+}); 
 // Public - Get Approved & Active Services
 app.get("/services", async (req, res) => {
   try {
@@ -439,6 +533,92 @@ app.patch("/admin-services/:id/active", async (req, res) => {
       message: "Failed to update service availability",
     });
   }
+});
+
+// Create Stripe Checkout Session
+app.post("/create-checkout-session", async (req, res) => {
+  try {
+    // Check Stripe Price ID
+    console.log("Stripe Price ID:", process.env.STRIPE_PRICE_ID);
+
+    const { userId, email } = req.body;
+
+    // Check required information
+    if (!userId || !email) {
+      return res.status(400).send({
+        message: "User ID and email are required",
+      });
+    }
+
+    // Find user
+    const user = await usersCollection.findOne({
+      _id: new ObjectId(userId),
+    });
+
+    if (!user) {
+      return res.status(404).send({
+        message: "User not found",
+      });
+    }
+
+    // Check existing Premium subscription
+    if (user.subscriptionPlan === "premium") {
+      return res.status(400).send({
+        message: "You are already a Premium user",
+      });
+    }
+
+    // Create Stripe Checkout Session
+    const session = await stripe.checkout.sessions.create({
+   mode: "payment",
+
+      line_items: [
+        {
+          price: process.env.STRIPE_PRICE_ID,
+          quantity: 1,
+        },
+      ],
+
+      customer_email: email,
+
+      metadata: {
+        userId: userId,
+      },
+
+      success_url: `${process.env.CLIENT_URL}/dashboard/vendor/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
+
+cancel_url: `${process.env.CLIENT_URL}/dashboard/vendor/subscription/cancel`,
+    });
+
+    // Send Checkout URL
+    res.send({
+      success: true,
+      url: session.url,
+    });
+  } catch (error) {
+    console.error("Stripe Checkout Error:", error.message);
+
+    res.status(500).send({
+      message: error.message,
+    });
+  }
+});
+//verify payment
+app.post("/verify-payment", async (req, res) => {
+  const { sessionId } = req.body;
+
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+  if (session.payment_status !== "paid") {
+    return res.send({ message: "Payment not completed" });
+  }
+
+  await usersCollection.updateOne(
+    { _id: new ObjectId(session.metadata.userId) },
+    { $set: { subscriptionPlan: "premium" } },
+  );
+
+  res.send({ success: true, message: "Premium activated" });
 });
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);

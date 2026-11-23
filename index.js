@@ -3,7 +3,7 @@ import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
 import Stripe from "stripe";
-
+import { verifyToken, verifyAdmin } from "./middlewares/verifyToken.js";
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -620,6 +620,32 @@ app.post("/verify-payment", async (req, res) => {
 
   res.send({ success: true, message: "Premium activated" });
 });
+//transactions apis
+
+app.get("/admin-transactions", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const transactions = await transactionsCollection
+      .find()
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const result = await Promise.all(
+      transactions.map(async (item) => {
+        const vendor = await usersCollection.findOne(
+          { _id: new ObjectId(item.vendorId) },
+          { projection: { name: 1, email: 1 } }
+        );
+
+        return { ...item, vendor };
+      })
+    );
+
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to fetch transactions" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });

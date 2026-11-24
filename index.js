@@ -3,7 +3,11 @@ import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
 import Stripe from "stripe";
-import { verifyToken, verifyAdmin } from "./middlewares/verifyToken.js";
+import {
+  verifyToken,
+  verifyVendor,
+  verifyAdmin,
+} from "./middlewares/verifyToken.js";
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -102,7 +106,6 @@ app.post(
 // JSON middleware MUST be after webhook
 app.use(express.json());
 
-
 const client = new MongoClient(process.env.MONGODB_URL);
 
 export async function connectToMongoDB() {
@@ -127,48 +130,65 @@ app.get("/", (req, res) => {
   res.json({ message: "WedPlan server is running 🎉" });
 });
 // Add Service API
-app.post("/services", async (req, res) => {
-  try {
-    const { vendorId } = req.body;
 
-    const vendor = await usersCollection.findOne({
-      _id: new ObjectId(vendorId),
-    });
+app.post(
+  "/services",
+  verifyToken(usersCollection),
+  verifyVendor,
+  async (req, res) => {
+    try {
+      const vendorId = req.user.id;
 
-    if (!vendor) {
-      return res.status(404).send({ message: "Vendor not found" });
-    }
+      const vendor = await usersCollection.findOne({
+        _id: new ObjectId(vendorId),
+      });
 
-    if (vendor.subscriptionPlan !== "premium") {
-      const count = await servicesCollection.countDocuments({ vendorId });
-
-      if (count >= 3) {
-        return res.status(403).send({
-          success: false,
-          limitReached: true,
-          message: "Free plan limit reached! Upgrade to Premium.",
+      if (!vendor) {
+        return res.status(404).send({
+          message: "Vendor not found",
         });
       }
+
+      if (vendor.subscriptionPlan !== "premium") {
+        const count = await servicesCollection.countDocuments({
+          vendorId,
+        });
+
+        if (count >= 3) {
+          return res.status(403).send({
+            success: false,
+            limitReached: true,
+            message: "Free plan limit reached! Upgrade to Premium.",
+          });
+        }
+      }
+      const { vendorId: clientVendorId, ...serviceInfo } = req.body;
+
+      const serviceData = {
+        ...serviceInfo,
+        vendorId,
+        status: "pending",
+        isActive: false,
+        createdAt: new Date().toISOString(),
+      };
+
+      const result = await servicesCollection.insertOne(serviceData);
+
+      res.send({
+        success: true,
+        message: "Service added successfully!",
+        insertedId: result.insertedId,
+      });
+    } catch (error) {
+      console.error("Add Service Error:", error);
+
+      res.status(500).send({
+        message: "Failed to add service",
+      });
     }
+  },
+);
 
-    const serviceData = {
-      ...req.body,
-      status: "pending",
-      isActive: false,
-      createdAt: new Date().toISOString(),
-    };
-
-    const result = await servicesCollection.insertOne(serviceData);
-
-    res.send({
-      success: true,
-      message: "Service added successfully!",
-      insertedId: result.insertedId,
-    });
-  } catch (error) {
-    res.status(500).send({ message: "Failed to add service" });
-  }
-}); 
 // Public - Get Approved & Active Services
 app.get("/services", async (req, res) => {
   try {
@@ -186,48 +206,111 @@ app.get("/services", async (req, res) => {
     });
   }
 });
-// Get services by user email
-app.get("/my-services", async (req, res) => {
-  const email = req.query.email;
-  const result = await servicesCollection.find({ userEmail: email }).toArray();
 
-  res.send(result);
-});
+// Get services by authenticated vendor
+app.get(
+  "/my-services",
+  verifyToken(usersCollection),
+  verifyVendor,
+  async (req, res) => {
+    try {
+      const vendorId = req.user.id;
+
+      const result = await servicesCollection.find({ vendorId }).toArray();
+
+      res.send(result);
+    } catch (error) {
+      console.error("Get My Services Error:", error);
+
+      res.status(500).send({
+        message: "Failed to get your services",
+      });
+    }
+  },
+);
 
 // Update Service
-app.patch("/services/:id", async (req, res) => {
-  const id = req.params.id;
-  const updatedService = req.body;
+app.patch(
+  "/services/:id",
+  verifyToken(usersCollection),
+  verifyVendor,
+  async (req, res) => {
+    try {
+      const id = req.params.id;
+      const vendorId = req.user.id;
+      const updatedService = req.body;
 
-  const result = await servicesCollection.updateOne(
-    { _id: new ObjectId(id) },
-    {
-      $set: {
-        serviceName: updatedService.serviceName,
-        category: updatedService.category,
-        price: updatedService.price,
-        location: updatedService.location,
-        description: updatedService.description,
-        images: updatedService.images,
-      },
-    },
-  );
+      const result = await servicesCollection.updateOne(
+        {
+          _id: new ObjectId(id),
+          vendorId: vendorId,
+        },
+        {
+          $set: {
+            serviceName: updatedService.serviceName,
+            category: updatedService.category,
+            price: updatedService.price,
+            location: updatedService.location,
+            description: updatedService.description,
+            images: updatedService.images,
+          },
+        },
+      );
 
-  res.send(result);
-});
+      if (result.matchedCount === 0) {
+        return res.status(404).send({
+          message: "Service not found or you are not the owner",
+        });
+      }
+
+      res.send(result);
+    } catch (error) {
+      console.error("Update Service Error:", error);
+
+      res.status(500).send({
+        message: "Failed to update service",
+      });
+    }
+  },
+);
+
 // Delete Service
-app.delete("/services/:id", async (req, res) => {
-  const id = req.params.id;
-  const result = await servicesCollection.deleteOne({
-    _id: new ObjectId(id),
-  });
+app.delete(
+  "/services/:id",
+  verifyToken(usersCollection),
+  verifyVendor,
+  async (req, res) => {
+    try {
+      const id = req.params.id;
+      const vendorId = req.user.id;
 
-  res.send({
-    success: true,
-    message: "Service deleted successfully!",
-    deletedCount: result.deletedCount,
-  });
-});
+      const result = await servicesCollection.deleteOne({
+        _id: new ObjectId(id),
+        vendorId: vendorId,
+      });
+
+      if (result.deletedCount === 0) {
+        return res.status(404).send({
+          success: false,
+          message: "Service not found or you are not the owner",
+        });
+      }
+
+      res.send({
+        success: true,
+        message: "Service deleted successfully!",
+        deletedCount: result.deletedCount,
+      });
+    } catch (error) {
+      console.error("Delete Service Error:", error);
+
+      res.status(500).send({
+        success: false,
+        message: "Failed to delete service",
+      });
+    }
+  },
+);
 // Get Single Service by ID
 app.get("/services/:id", async (req, res) => {
   const id = req.params.id;
@@ -412,128 +495,153 @@ app.get("/admin-overview", async (req, res) => {
 });
 
 // Admin Manage Users API
-app.get("/admin-users", async (req, res) => {
-  try {
-    const users = await usersCollection
-      .find({})
-      .project({
-        name: 1,
-        email: 1,
-        image: 1,
-        role: 1,
-        createdAt: 1,
-        isBlocked: 1,
-      })
-      .toArray();
+app.get(
+  "/admin-users",
+  verifyToken(usersCollection),
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const users = await usersCollection
+        .find({})
+        .project({
+          name: 1,
+          email: 1,
+          image: 1,
+          role: 1,
+          createdAt: 1,
+          isBlocked: 1,
+        })
+        .toArray();
 
-    res.send(users);
-  } catch (error) {
-    res.status(500).send({ message: "Failed to fetch users" });
-  }
-});
+      res.send(users);
+    } catch (error) {
+      res.status(500).send({ message: "Failed to fetch users" });
+    }
+  },
+);
 
 // Block / Unblock User
-app.patch("/admin-users/:id", async (req, res) => {
-  try {
-    const result = await usersCollection.updateOne(
-      { _id: new ObjectId(req.params.id) },
-      { $set: { isBlocked: req.body.isBlocked } },
-    );
+app.patch(
+  "/admin-users/:id",
+  verifyToken(usersCollection),
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: { isBlocked: req.body.isBlocked } },
+      );
 
-    res.send({ success: result.modifiedCount > 0 });
-  } catch (error) {
-    res.status(500).send({ message: "Failed to update user" });
-  }
-});
+      res.send({ success: result.modifiedCount > 0 });
+    } catch (error) {
+      res.status(500).send({ message: "Failed to update user" });
+    }
+  },
+);
 // Admin - Get All Services
-app.get("/admin-services", async (req, res) => {
-  try {
-    const services = await servicesCollection.find({}).toArray();
+app.get(
+  "/admin-services",
+  verifyToken(usersCollection),
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const services = await servicesCollection.find({}).toArray();
 
-    res.status(200).send(services);
-  } catch (error) {
-    console.error("Admin services error:", error);
-    res.status(500).send({
-      message: "Failed to fetch admin services",
-    });
-  }
-});
+      res.status(200).send(services);
+    } catch (error) {
+      console.error("Admin services error:", error);
+      res.status(500).send({
+        message: "Failed to fetch admin services",
+      });
+    }
+  },
+);
 // Admin - Update Service Status
-app.patch("/admin-services/:id/status", async (req, res) => {
-  try {
-    const { status } = req.body;
+app.patch(
+  "/admin-services/:id/status",
+  verifyToken(usersCollection),
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const { status } = req.body;
 
-    if (!["pending", "approved", "rejected"].includes(status)) {
-      return res.status(400).send({
-        message: "Invalid status",
+      if (!["pending", "approved", "rejected"].includes(status)) {
+        return res.status(400).send({
+          message: "Invalid status",
+        });
+      }
+
+      const updateData = { status };
+
+      // Rejected service automatically inactive হবে
+      if (status === "rejected") {
+        updateData.isActive = false;
+      }
+
+      const result = await servicesCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: updateData },
+      );
+
+      if (!result.matchedCount) {
+        return res.status(404).send({
+          message: "Service not found",
+        });
+      }
+
+      res.send({
+        success: true,
+        message: "Service status updated successfully",
+      });
+    } catch (error) {
+      res.status(500).send({
+        message: "Failed to update service status",
       });
     }
-
-    const updateData = { status };
-
-    // Rejected service automatically inactive হবে
-    if (status === "rejected") {
-      updateData.isActive = false;
-    }
-
-    const result = await servicesCollection.updateOne(
-      { _id: new ObjectId(req.params.id) },
-      { $set: updateData },
-    );
-
-    if (!result.matchedCount) {
-      return res.status(404).send({
-        message: "Service not found",
-      });
-    }
-
-    res.send({
-      success: true,
-      message: "Service status updated successfully",
-    });
-  } catch (error) {
-    res.status(500).send({
-      message: "Failed to update service status",
-    });
-  }
-});
+  },
+);
 // Admin - Update Service Active Status
-app.patch("/admin-services/:id/active", async (req, res) => {
-  try {
-    const { isActive } = req.body;
+app.patch(
+  "/admin-services/:id/active",
+  verifyToken(usersCollection),
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const { isActive } = req.body;
 
-    if (typeof isActive !== "boolean") {
-      return res.status(400).send({
-        message: "Invalid active status",
+      if (typeof isActive !== "boolean") {
+        return res.status(400).send({
+          message: "Invalid active status",
+        });
+      }
+
+      const result = await servicesCollection.updateOne(
+        {
+          _id: new ObjectId(req.params.id),
+          status: "approved",
+        },
+        {
+          $set: { isActive },
+        },
+      );
+
+      if (!result.matchedCount) {
+        return res.status(404).send({
+          message: "Approved service not found",
+        });
+      }
+
+      res.send({
+        success: true,
+        message: "Service availability updated successfully",
+      });
+    } catch (error) {
+      res.status(500).send({
+        message: "Failed to update service availability",
       });
     }
-
-    const result = await servicesCollection.updateOne(
-      {
-        _id: new ObjectId(req.params.id),
-        status: "approved",
-      },
-      {
-        $set: { isActive },
-      },
-    );
-
-    if (!result.matchedCount) {
-      return res.status(404).send({
-        message: "Approved service not found",
-      });
-    }
-
-    res.send({
-      success: true,
-      message: "Service availability updated successfully",
-    });
-  } catch (error) {
-    res.status(500).send({
-      message: "Failed to update service availability",
-    });
-  }
-});
+  },
+);
 
 // Create Stripe Checkout Session
 app.post("/create-checkout-session", async (req, res) => {
@@ -570,7 +678,7 @@ app.post("/create-checkout-session", async (req, res) => {
 
     // Create Stripe Checkout Session
     const session = await stripe.checkout.sessions.create({
-   mode: "payment",
+      mode: "payment",
 
       line_items: [
         {
@@ -587,7 +695,7 @@ app.post("/create-checkout-session", async (req, res) => {
 
       success_url: `${process.env.CLIENT_URL}/dashboard/vendor/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
 
-cancel_url: `${process.env.CLIENT_URL}/dashboard/vendor/subscription/cancel`,
+      cancel_url: `${process.env.CLIENT_URL}/dashboard/vendor/subscription/cancel`,
     });
 
     // Send Checkout URL
@@ -622,29 +730,34 @@ app.post("/verify-payment", async (req, res) => {
 });
 //transactions apis
 
-app.get("/admin-transactions", verifyToken, verifyAdmin, async (req, res) => {
-  try {
-    const transactions = await transactionsCollection
-      .find()
-      .sort({ createdAt: -1 })
-      .toArray();
+app.get(
+  "/admin-overview",
+  verifyToken(usersCollection),
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const transactions = await transactionsCollection
+        .find()
+        .sort({ createdAt: -1 })
+        .toArray();
 
-    const result = await Promise.all(
-      transactions.map(async (item) => {
-        const vendor = await usersCollection.findOne(
-          { _id: new ObjectId(item.vendorId) },
-          { projection: { name: 1, email: 1 } }
-        );
+      const result = await Promise.all(
+        transactions.map(async (item) => {
+          const vendor = await usersCollection.findOne(
+            { _id: new ObjectId(item.vendorId) },
+            { projection: { name: 1, email: 1 } },
+          );
 
-        return { ...item, vendor };
-      })
-    );
+          return { ...item, vendor };
+        }),
+      );
 
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ message: "Failed to fetch transactions" });
-  }
-});
+      res.send(result);
+    } catch (error) {
+      res.status(500).send({ message: "Failed to fetch transactions" });
+    }
+  },
+);
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);

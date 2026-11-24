@@ -326,72 +326,173 @@ app.get("/services/:id", async (req, res) => {
 
   res.send(service);
 });
-// Create Booking API
-app.post("/bookings", async (req, res) => {
-  const bookingData = req.body;
 
-  const result = await bookingsCollection.insertOne({
-    ...bookingData,
-    status: "pending",
-    createdAt: new Date(),
-  });
-
-  res.send({
-    success: true,
-    message: "Booking successful!",
-    insertedId: result.insertedId,
-  });
-});
-//vendor-bookings
-app.get("/vendor-bookings", async (req, res) => {
-  const vendorId = req.query.vendorId;
-
-  const bookings = await bookingsCollection
-    .find({ vendorId: vendorId })
-    .toArray();
-
-  res.send(bookings);
-});
-app.get("/vendor-bookings-with-service", async (req, res) => {
-  const vendorId = req.query.vendorId;
-
-  const bookings = await bookingsCollection.find({ vendorId }).toArray();
-
-  const bookingsWithService = await Promise.all(
-    bookings.map(async (booking) => {
-      const service = await servicesCollection.findOne({
-        _id: new ObjectId(booking.serviceId),
+// Create Booking API - Secure
+app.post("/bookings",
+  verifyToken(usersCollection),
+  async (req, res) => {
+    // Only customers can create bookings
+    if (req.user.role !== "customer") {
+      return res.status(403).send({
+        success: false,
+        message: "Only customers can book services.",
       });
+    }
 
-      return {
-        ...booking,
-        service,
-      };
-    }),
-  );
+    const { serviceId, eventDate, eventLocation, message } = req.body;
 
-  res.send(bookingsWithService);
-});
-// Update Booking Status
-app.patch("/bookings/:id", async (req, res) => {
-  const id = req.params.id;
-  const { status } = req.body;
+    // Validate required fields
+    if (
+      !serviceId ||
+      !eventDate ||
+      typeof eventLocation !== "string" ||
+      !eventLocation.trim()
+    ) {
+      return res.status(400).send({
+        success: false,
+        message: "Please fill in all required fields.",
+      });
+    }
 
-  const result = await bookingsCollection.updateOne(
-    { _id: new ObjectId(id) },
-    {
-      $set: {
-        status: status,
+    // Validate Service ID
+    if (!ObjectId.isValid(serviceId)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid service ID.",
+      });
+    }
+
+    // Get service from database
+    const service = await servicesCollection.findOne({
+      _id: new ObjectId(serviceId),
+    });
+
+    if (!service || !service.isActive) {
+      return res.status(404).send({
+        success: false,
+        message: "Service is not available.",
+      });
+    }
+
+    // Create secure booking data
+    const bookingData = {
+      serviceId: service._id.toString(),
+      customerId: req.user.id,
+      vendorId: service.vendorId,
+      eventDate,
+      eventLocation: eventLocation.trim(),
+      message: typeof message === "string" ? message.trim() : "",
+      status: "pending",
+      createdAt: new Date(),
+    };
+
+    const result = await bookingsCollection.insertOne(bookingData);
+
+    res.send({
+      success: true,
+      message: "Booking successful!",
+      insertedId: result.insertedId,
+    });
+  }
+);
+
+// Get Vendor Bookings - Secure
+app.get(
+  "/vendor-bookings",
+  verifyToken(usersCollection),
+  verifyVendor,
+  async (req, res) => {
+    const vendorId = req.user.id;
+
+    const bookings = await bookingsCollection
+      .find({ vendorId })
+      .toArray();
+
+    res.send(bookings);
+  }
+);
+// Get Vendor Bookings With Service - Secure
+app.get("/vendor-bookings-with-service",
+  verifyToken(usersCollection),
+  verifyVendor,
+  async (req, res) => {
+    const vendorId = req.user.id;
+
+    const bookings = await bookingsCollection
+      .find({ vendorId })
+      .toArray();
+
+    const bookingsWithService = await Promise.all(
+      bookings.map(async (booking) => {
+        const service = await servicesCollection.findOne({
+          _id: new ObjectId(booking.serviceId),
+        });
+
+        return {
+          ...booking,
+          service,
+        };
+      })
+    );
+
+    res.send(bookingsWithService);
+  }
+);
+
+ // Update Booking Status - Secure
+app.patch(
+  "/bookings/:id",
+  verifyToken(usersCollection),
+  verifyVendor,
+  async (req, res) => {
+    const id = req.params.id;
+    const { status } = req.body;
+
+    // Check valid Booking ID
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid booking ID.",
+      });
+    }
+
+    // Check allowed status
+    if (!["accepted", "rejected"].includes(status)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid booking status.",
+      });
+    }
+
+    // Update only the vendor's own pending booking
+    const result = await bookingsCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        vendorId: req.user.id,
+        status: "pending",
       },
-    },
-  );
+      {
+        $set: {
+          status: status,
+        },
+      }
+    );
 
-  res.send({
-    success: true,
-    message: "Booking status updated successfully!",
-    result,
-  });
-});
+    // Check whether the booking was updated
+    if (result.matchedCount === 0) {
+      return res.status(404).send({
+        success: false,
+        message: "Booking not found or you are not authorized to update it.",
+      });
+    }
+
+    res.send({
+      success: true,
+      message: "Booking status updated successfully!",
+    });
+  }
+);
+
 // Get User Info
 app.get("/users/:id", async (req, res) => {
   try {
@@ -423,40 +524,46 @@ app.get("/users/:id", async (req, res) => {
   }
 });
 //Customer Bookings API
-app.get("/customer-bookings", async (req, res) => {
-  const customerId = req.query.customerId;
 
-  const bookings = await bookingsCollection
-    .find({ customerId: customerId })
-    .toArray();
+// Customer Bookings API - Secure
+app.get("/customer-bookings",
+  verifyToken(usersCollection),
+  async (req, res) => {
+    // Get Customer ID from JWT Token
+    const customerId = req.user.id;
 
-  const bookingsWithDetails = await Promise.all(
-    bookings.map(async (booking) => {
-      const service = await servicesCollection.findOne({
-        _id: new ObjectId(booking.serviceId),
-      });
+    const bookings = await bookingsCollection
+      .find({ customerId })
+      .toArray();
 
-      const vendor = await usersCollection.findOne(
-        { _id: new ObjectId(booking.vendorId) },
-        {
-          projection: {
-            name: 1,
-            email: 1,
-            image: 1,
-          },
-        },
-      );
+    const bookingsWithDetails = await Promise.all(
+      bookings.map(async (booking) => {
+        const service = await servicesCollection.findOne({
+          _id: new ObjectId(booking.serviceId),
+        });
 
-      return {
-        ...booking,
-        service,
-        vendor,
-      };
-    }),
-  );
+        const vendor = await usersCollection.findOne(
+          { _id: new ObjectId(booking.vendorId) },
+          {
+            projection: {
+              name: 1,
+              email: 1,
+              image: 1,
+            },
+          }
+        );
 
-  res.send(bookingsWithDetails);
-});
+        return {
+          ...booking,
+          service,
+          vendor,
+        };
+      })
+    );
+
+    res.send(bookingsWithDetails);
+  }
+);
 
 // Admin Overview API
 app.get("/admin-overview", async (req, res) => {

@@ -13,9 +13,16 @@ const PORT = process.env.PORT || 5000;
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // CORS middleware
-app.use(cors());
+app.use(
+  cors({
+    origin: process.env.CLIENT_URL,
+    methods: ["GET", "POST", "PATCH", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+);
 
-app.post( "/webhook",
+app.post(
+  "/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
     const signature = req.headers["stripe-signature"];
@@ -27,7 +34,7 @@ app.post( "/webhook",
       event = stripe.webhooks.constructEvent(
         req.body,
         signature,
-        process.env.STRIPE_WEBHOOK_SECRET
+        process.env.STRIPE_WEBHOOK_SECRET,
       );
     } catch (error) {
       console.error("Webhook Signature Error:", error.message);
@@ -38,10 +45,7 @@ app.post( "/webhook",
       if (event.type === "checkout.session.completed") {
         const session = event.data.object;
 
-        if (
-          session.payment_status !== "paid" ||
-          session.mode !== "payment"
-        ) {
+        if (session.payment_status !== "paid" || session.mode !== "payment") {
           return res.json({ received: true });
         }
 
@@ -57,9 +61,7 @@ app.post( "/webhook",
         }
 
         // Verify Stripe Price
-        const items = await stripe.checkout.sessions.listLineItems(
-          session.id
-        );
+        const items = await stripe.checkout.sessions.listLineItems(session.id);
 
         if (
           items.data.length !== 1 ||
@@ -77,7 +79,7 @@ app.post( "/webhook",
               subscriptionPlan: "premium",
               premiumActivatedAt: new Date(),
             },
-          }
+          },
         );
 
         if (userResult.matchedCount === 0) {
@@ -99,7 +101,7 @@ app.post( "/webhook",
               createdAt: new Date(session.created * 1000),
             },
           },
-          { upsert: true }
+          { upsert: true },
         );
 
         console.log("Premium Activated:", userId);
@@ -110,12 +112,11 @@ app.post( "/webhook",
       console.error("Webhook Processing Error:", error);
       res.status(500).send("Webhook processing failed");
     }
-  }
+  },
 );
 
 // Keep JSON middleware after Webhook
 app.use(express.json());
-
 
 const client = new MongoClient(process.env.MONGODB_URL);
 
@@ -136,6 +137,11 @@ const servicesCollection = db.collection("services");
 const bookingsCollection = db.collection("bookings");
 const usersCollection = db.collection("user");
 const transactionsCollection = db.collection("transactions");
+// Prevent duplicate Stripe transactions
+await transactionsCollection.createIndex(
+  { stripeSessionId: 1 },
+  { unique: true },
+);
 
 app.get("/", (req, res) => {
   res.json({ message: "WedPlan server is running 🎉" });
@@ -163,6 +169,8 @@ app.post(
       if (vendor.subscriptionPlan !== "premium") {
         const count = await servicesCollection.countDocuments({
           vendorId,
+          isActive: true,
+          status: "approved",
         });
 
         if (count >= 3) {
@@ -173,10 +181,40 @@ app.post(
           });
         }
       }
-      const { vendorId: clientVendorId, ...serviceInfo } = req.body;
 
+      const { serviceName, category, price, location, description, images } =
+        req.body;
+
+      // Validate service data
+      if (
+        typeof serviceName !== "string" ||
+        !serviceName.trim() ||
+        typeof category !== "string" ||
+        !category.trim() ||
+        typeof price !== "number" ||
+        price <= 0 ||
+        typeof location !== "string" ||
+        !location.trim() ||
+        typeof description !== "string" ||
+        !description.trim() ||
+        !Array.isArray(images) ||
+        images.length === 0 ||
+        !images.every((image) => typeof image === "string")
+      ) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid service data",
+        });
+      }
+
+      // Create secure service data
       const serviceData = {
-        ...serviceInfo,
+        serviceName: serviceName.trim(),
+        category: category.trim(),
+        price,
+        location: location.trim(),
+        description: description.trim(),
+        images,
         vendorId,
         status: "pending",
         isActive: false,
@@ -241,16 +279,50 @@ app.get(
 );
 
 // Update Service
+
 app.patch(
   "/services/:id",
   verifyToken(usersCollection),
   verifyVendor,
   async (req, res) => {
     try {
-      const id = req.params.id;
+      const { id } = req.params;
       const vendorId = req.user.id;
-      const updatedService = req.body;
 
+      // Validate MongoDB ID
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid service ID",
+        });
+      }
+
+      const { serviceName, category, price, location, description, images } =
+        req.body;
+
+      // Validate required fields
+      if (
+        typeof serviceName !== "string" ||
+        !serviceName.trim() ||
+        typeof category !== "string" ||
+        !category.trim() ||
+        typeof location !== "string" ||
+        !location.trim() ||
+        typeof description !== "string" ||
+        !description.trim() ||
+        typeof price !== "number" ||
+        price <= 0 ||
+        !Array.isArray(images) ||
+        images.length === 0 ||
+        !images.every((image) => typeof image === "string")
+      ) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid service data",
+        });
+      }
+
+      // Update only allowed fields
       const result = await servicesCollection.updateOne(
         {
           _id: new ObjectId(id),
@@ -258,27 +330,34 @@ app.patch(
         },
         {
           $set: {
-            serviceName: updatedService.serviceName,
-            category: updatedService.category,
-            price: updatedService.price,
-            location: updatedService.location,
-            description: updatedService.description,
-            images: updatedService.images,
+            serviceName: serviceName.trim(),
+            category: category.trim(),
+            price,
+            location: location.trim(),
+            description: description.trim(),
+            images,
+            status: "pending",
+            isActive: false,
           },
         },
       );
 
       if (result.matchedCount === 0) {
         return res.status(404).send({
+          success: false,
           message: "Service not found or you are not the owner",
         });
       }
 
-      res.send(result);
+      res.send({
+        success: true,
+        message: "Service updated successfully",
+      });
     } catch (error) {
       console.error("Update Service Error:", error);
 
       res.status(500).send({
+        success: false,
         message: "Failed to update service",
       });
     }
@@ -294,6 +373,12 @@ app.delete(
     try {
       const id = req.params.id;
       const vendorId = req.user.id;
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid service ID",
+        });
+      }
 
       const result = await servicesCollection.deleteOne({
         _id: new ObjectId(id),
@@ -322,26 +407,45 @@ app.delete(
     }
   },
 );
-// Get Single Service by ID
+// Get Single Approved & Active Service
 app.get("/services/:id", async (req, res) => {
-  const id = req.params.id;
-  const service = await servicesCollection.findOne({
-    _id: new ObjectId(id),
-  });
+  try {
+    const { id } = req.params;
 
-  if (!service) {
-    return res.status(404).send({
-      message: "Service not found",
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid service ID",
+      });
+    }
+
+    const service = await servicesCollection.findOne({
+      _id: new ObjectId(id),
+      status: "approved",
+      isActive: true,
+    });
+
+    if (!service) {
+      return res.status(404).send({
+        success: false,
+        message: "Service not found or unavailable",
+      });
+    }
+
+    res.send(service);
+  } catch (error) {
+    console.error("Get Single Service Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch service",
     });
   }
-
-  res.send(service);
 });
 
 // Create Booking API - Secure
-app.post("/bookings",
-  verifyToken(usersCollection),
-  async (req, res) => {
+app.post("/bookings", verifyToken(usersCollection), async (req, res) => {
+  try {
     // Only customers can create bookings
     if (req.user.role !== "customer") {
       return res.status(403).send({
@@ -378,10 +482,26 @@ app.post("/bookings",
       _id: new ObjectId(serviceId),
     });
 
-    if (!service || !service.isActive) {
+    // Check service availability
+    if (!service || !service.isActive || service.status !== "approved") {
       return res.status(404).send({
         success: false,
         message: "Service is not available.",
+      });
+    }
+
+    // Check duplicate booking
+    const existingBooking = await bookingsCollection.findOne({
+      customerId: req.user.id,
+      serviceId: service._id.toString(),
+      eventDate,
+      status: { $in: ["pending", "accepted"] },
+    });
+
+    if (existingBooking) {
+      return res.status(409).send({
+        success: false,
+        message: "You have already booked this service for this date.",
       });
     }
 
@@ -404,8 +524,15 @@ app.post("/bookings",
       message: "Booking successful!",
       insertedId: result.insertedId,
     });
+  } catch (error) {
+    console.error("Booking Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to create booking.",
+    });
   }
-);
+});
 
 // Get Vendor Bookings - Secure
 app.get(
@@ -415,23 +542,20 @@ app.get(
   async (req, res) => {
     const vendorId = req.user.id;
 
-    const bookings = await bookingsCollection
-      .find({ vendorId })
-      .toArray();
+    const bookings = await bookingsCollection.find({ vendorId }).toArray();
 
     res.send(bookings);
-  }
+  },
 );
 // Get Vendor Bookings With Service - Secure
-app.get("/vendor-bookings-with-service",
+app.get(
+  "/vendor-bookings-with-service",
   verifyToken(usersCollection),
   verifyVendor,
   async (req, res) => {
     const vendorId = req.user.id;
 
-    const bookings = await bookingsCollection
-      .find({ vendorId })
-      .toArray();
+    const bookings = await bookingsCollection.find({ vendorId }).toArray();
 
     const bookingsWithService = await Promise.all(
       bookings.map(async (booking) => {
@@ -443,14 +567,14 @@ app.get("/vendor-bookings-with-service",
           ...booking,
           service,
         };
-      })
+      }),
     );
 
     res.send(bookingsWithService);
-  }
+  },
 );
 
- // Update Booking Status - Secure
+// Update Booking Status - Secure
 app.patch(
   "/bookings/:id",
   verifyToken(usersCollection),
@@ -486,7 +610,7 @@ app.patch(
         $set: {
           status: status,
         },
-      }
+      },
     );
 
     // Check whether the booking was updated
@@ -501,51 +625,69 @@ app.patch(
       success: true,
       message: "Booking status updated successfully!",
     });
-  }
+  },
 );
 
 // Get User Info
+
 app.get("/users/:id", async (req, res) => {
   try {
+    const { id } = req.params;
+
+    // Validate User ID
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid user ID",
+      });
+    }
+
     const user = await usersCollection.findOne(
-      { _id: new ObjectId(req.params.id) },
+      { _id: new ObjectId(id) },
       {
         projection: {
           name: 1,
-          email: 1,
           image: 1,
-          role: 1,
-          subscriptionPlan: 1,
-          subscriptionExpiresAt: 1,
         },
       },
     );
 
     if (!user) {
       return res.status(404).send({
+        success: false,
         message: "User not found",
       });
     }
 
-    res.send(user);
+    res.send({
+      success: true,
+      user,
+    });
   } catch (error) {
+    console.error("Get User Error:", error);
+
     res.status(500).send({
+      success: false,
       message: "Failed to fetch user",
     });
   }
 });
-//Customer Bookings API
 
 // Customer Bookings API - Secure
-app.get("/customer-bookings",
+app.get(
+  "/customer-bookings",
   verifyToken(usersCollection),
   async (req, res) => {
-    // Get Customer ID from JWT Token
+    // Only customers can access customer bookings
+    if (req.user.role !== "customer") {
+      return res.status(403).send({
+        success: false,
+        message: "Only customers can access their bookings.",
+      });
+    }
     const customerId = req.user.id;
 
-    const bookings = await bookingsCollection
-      .find({ customerId })
-      .toArray();
+    const bookings = await bookingsCollection.find({ customerId }).toArray();
 
     const bookingsWithDetails = await Promise.all(
       bookings.map(async (booking) => {
@@ -561,7 +703,7 @@ app.get("/customer-bookings",
               email: 1,
               image: 1,
             },
-          }
+          },
         );
 
         return {
@@ -569,48 +711,53 @@ app.get("/customer-bookings",
           service,
           vendor,
         };
-      })
+      }),
     );
 
     res.send(bookingsWithDetails);
-  }
+  },
 );
 
 // Admin Overview API
-app.get("/admin-overview", async (req, res) => {
-  try {
-    const totalUsers = await usersCollection.countDocuments();
+app.get(
+  "/admin-overview",
+  verifyToken(usersCollection),
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const totalUsers = await usersCollection.countDocuments();
 
-    const totalVendors = await usersCollection.countDocuments({
-      role: "vendor",
-    });
+      const totalVendors = await usersCollection.countDocuments({
+        role: "vendor",
+      });
 
-    const totalCustomers = await usersCollection.countDocuments({
-      role: "customer",
-    });
+      const totalCustomers = await usersCollection.countDocuments({
+        role: "customer",
+      });
 
-    const totalServices = await servicesCollection.countDocuments();
+      const totalServices = await servicesCollection.countDocuments();
 
-    const pendingServices = await servicesCollection.countDocuments({
-      status: "pending",
-    });
+      const pendingServices = await servicesCollection.countDocuments({
+        status: "pending",
+      });
 
-    const totalTransactions = await transactionsCollection.countDocuments();
+      const totalTransactions = await transactionsCollection.countDocuments();
 
-    res.send({
-      totalUsers,
-      totalVendors,
-      totalCustomers,
-      totalServices,
-      pendingServices,
-      totalTransactions,
-    });
-  } catch (error) {
-    res.status(500).send({
-      message: "Failed to fetch admin overview",
-    });
-  }
-});
+      res.send({
+        totalUsers,
+        totalVendors,
+        totalCustomers,
+        totalServices,
+        pendingServices,
+        totalTransactions,
+      });
+    } catch (error) {
+      res.status(500).send({
+        message: "Failed to fetch admin overview",
+      });
+    }
+  },
+);
 
 // Admin Manage Users API
 app.get(
@@ -639,23 +786,59 @@ app.get(
 );
 
 // Block / Unblock User
+
 app.patch(
   "/admin-users/:id",
   verifyToken(usersCollection),
   verifyAdmin,
   async (req, res) => {
     try {
+      const { id } = req.params;
+      const { isBlocked } = req.body;
+
+      // Validate User ID
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid user ID",
+        });
+      }
+
+      // Validate isBlocked
+      if (typeof isBlocked !== "boolean") {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid blocked status",
+        });
+      }
+
       const result = await usersCollection.updateOne(
-        { _id: new ObjectId(req.params.id) },
-        { $set: { isBlocked: req.body.isBlocked } },
+        { _id: new ObjectId(id) },
+        { $set: { isBlocked } },
       );
 
-      res.send({ success: result.modifiedCount > 0 });
+      if (result.matchedCount === 0) {
+        return res.status(404).send({
+          success: false,
+          message: "User not found",
+        });
+      }
+
+      res.send({
+        success: true,
+        message: "User status updated successfully",
+      });
     } catch (error) {
-      res.status(500).send({ message: "Failed to update user" });
+      console.error("Block User Error:", error);
+
+      res.status(500).send({
+        success: false,
+        message: "Failed to update user",
+      });
     }
   },
 );
+
 // Admin - Get All Services
 app.get(
   "/admin-services",
@@ -675,34 +858,48 @@ app.get(
   },
 );
 // Admin - Update Service Status
+
 app.patch(
   "/admin-services/:id/status",
   verifyToken(usersCollection),
   verifyAdmin,
   async (req, res) => {
     try {
+      const { id } = req.params;
       const { status } = req.body;
 
+      // Validate Service ID
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid service ID",
+        });
+      }
+
+      // Validate Status
       if (!["pending", "approved", "rejected"].includes(status)) {
         return res.status(400).send({
+          success: false,
           message: "Invalid status",
         });
       }
 
       const updateData = { status };
 
-      // Rejected service automatically inactive হবে
+      // Rejected service automatically inactive
       if (status === "rejected") {
         updateData.isActive = false;
       }
 
+      // Update Service
       const result = await servicesCollection.updateOne(
-        { _id: new ObjectId(req.params.id) },
+        { _id: new ObjectId(id) },
         { $set: updateData },
       );
 
-      if (!result.matchedCount) {
+      if (result.matchedCount === 0) {
         return res.status(404).send({
+          success: false,
           message: "Service not found",
         });
       }
@@ -712,30 +909,46 @@ app.patch(
         message: "Service status updated successfully",
       });
     } catch (error) {
+      console.error("Update Service Status Error:", error);
+
       res.status(500).send({
+        success: false,
         message: "Failed to update service status",
       });
     }
   },
 );
+
 // Admin - Update Service Active Status
+
 app.patch(
   "/admin-services/:id/active",
   verifyToken(usersCollection),
   verifyAdmin,
   async (req, res) => {
     try {
+      const { id } = req.params;
       const { isActive } = req.body;
 
+      // Validate Service ID
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid service ID",
+        });
+      }
+
+      // Validate Active Status
       if (typeof isActive !== "boolean") {
         return res.status(400).send({
+          success: false,
           message: "Invalid active status",
         });
       }
 
       const result = await servicesCollection.updateOne(
         {
-          _id: new ObjectId(req.params.id),
+          _id: new ObjectId(id),
           status: "approved",
         },
         {
@@ -743,8 +956,9 @@ app.patch(
         },
       );
 
-      if (!result.matchedCount) {
+      if (result.matchedCount === 0) {
         return res.status(404).send({
+          success: false,
           message: "Approved service not found",
         });
       }
@@ -754,7 +968,10 @@ app.patch(
         message: "Service availability updated successfully",
       });
     } catch (error) {
+      console.error("Update Service Active Status Error:", error);
+
       res.status(500).send({
+        success: false,
         message: "Failed to update service availability",
       });
     }
@@ -762,12 +979,12 @@ app.patch(
 );
 
 // Create Stripe Checkout Session - Secure
-app.post("/create-checkout-session",
+app.post(
+  "/create-checkout-session",
   verifyToken(usersCollection),
   verifyVendor,
   async (req, res) => {
     try {
-     
       const userId = req.user.id;
       if (!ObjectId.isValid(userId)) {
         return res.status(400).send({
@@ -835,7 +1052,7 @@ app.post("/create-checkout-session",
         message: "Unable to create checkout session.",
       });
     }
-  }
+  },
 );
 
 //verify payment
@@ -877,17 +1094,15 @@ app.post(
         return res.status(400).send({ message: "Invalid payment details" });
       }
 
-      await usersCollection.updateOne(
-        { _id: new ObjectId(userId) },
-        {
-          $set: {
-            subscriptionPlan: "premium",
-            premiumActivatedAt: new Date(),
-          },
-        }
-      );
+      // Payment verified successfully
+      // Premium activation is handled by Stripe webhook
 
-      res.send({ success: true, message: "Premium activated" });
+      res.send({
+        success: true,
+        paymentVerified: true,
+        premiumActivated: false,
+        message: "Payment verified. Premium activation is being processed.",
+      });
     } catch (error) {
       console.error("Payment Error:", error);
       res.status(500).send({
@@ -895,11 +1110,11 @@ app.post(
         message: "Verification failed",
       });
     }
-  }
+  },
 );
 
 app.get(
-  "/admin-overview",
+  "/admin-transactions",
   verifyToken(usersCollection),
   verifyAdmin,
   async (req, res) => {
@@ -930,3 +1145,45 @@ app.get(
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
+// Get logged-in vendor subscription status
+app.get(
+  "/my-subscription",
+  verifyToken(usersCollection),
+  verifyVendor,
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+
+      const user = await usersCollection.findOne(
+        { _id: new ObjectId(userId) },
+        {
+          projection: {
+            subscriptionPlan: 1,
+            premiumActivatedAt: 1,
+          },
+        },
+      );
+
+      if (!user) {
+        return res.status(404).send({
+          success: false,
+          message: "User not found",
+        });
+      }
+
+      res.send({
+        success: true,
+        subscriptionPlan: user.subscriptionPlan || "free",
+        isPremium: user.subscriptionPlan === "premium",
+        premiumActivatedAt: user.premiumActivatedAt || null,
+      });
+    } catch (error) {
+      console.error("Subscription Status Error:", error);
+
+      res.status(500).send({
+        success: false,
+        message: "Failed to get subscription status",
+      });
+    }
+  },
+);

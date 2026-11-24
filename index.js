@@ -750,92 +750,142 @@ app.patch(
   },
 );
 
-// Create Stripe Checkout Session
-app.post("/create-checkout-session", async (req, res) => {
-  try {
-    // Check Stripe Price ID
-    console.log("Stripe Price ID:", process.env.STRIPE_PRICE_ID);
+// Create Stripe Checkout Session - Secure
+app.post("/create-checkout-session",
+  verifyToken(usersCollection),
+  verifyVendor,
+  async (req, res) => {
+    try {
+     
+      const userId = req.user.id;
+      if (!ObjectId.isValid(userId)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid user ID.",
+        });
+      }
 
-    const { userId, email } = req.body;
-
-    // Check required information
-    if (!userId || !email) {
-      return res.status(400).send({
-        message: "User ID and email are required",
+      const user = await usersCollection.findOne({
+        _id: new ObjectId(userId),
       });
-    }
 
-    // Find user
-    const user = await usersCollection.findOne({
-      _id: new ObjectId(userId),
-    });
+      if (!user) {
+        return res.status(404).send({
+          success: false,
+          message: "User not found.",
+        });
+      }
 
-    if (!user) {
-      return res.status(404).send({
-        message: "User not found",
-      });
-    }
+      if (user.subscriptionPlan === "premium") {
+        return res.status(400).send({
+          success: false,
+          message: "You are already a Premium user.",
+        });
+      }
+      if (!process.env.STRIPE_PRICE_ID) {
+        return res.status(500).send({
+          success: false,
+          message: "Stripe Price ID is not configured.",
+        });
+      }
 
-    // Check existing Premium subscription
-    if (user.subscriptionPlan === "premium") {
-      return res.status(400).send({
-        message: "You are already a Premium user",
-      });
-    }
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
 
-    // Create Stripe Checkout Session
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
+        line_items: [
+          {
+            price: process.env.STRIPE_PRICE_ID,
+            quantity: 1,
+          },
+        ],
 
-      line_items: [
-        {
-          price: process.env.STRIPE_PRICE_ID,
-          quantity: 1,
+        customer_email: user.email,
+
+        client_reference_id: userId,
+
+        metadata: {
+          userId: userId,
         },
-      ],
 
-      customer_email: email,
+        success_url: `${process.env.CLIENT_URL}/dashboard/vendor/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
 
-      metadata: {
-        userId: userId,
-      },
+        cancel_url: `${process.env.CLIENT_URL}/dashboard/vendor/subscription/cancel`,
+      });
 
-      success_url: `${process.env.CLIENT_URL}/dashboard/vendor/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
+      res.send({
+        success: true,
+        url: session.url,
+      });
+    } catch (error) {
+      console.error("Stripe Checkout Error:", error.message);
 
-      cancel_url: `${process.env.CLIENT_URL}/dashboard/vendor/subscription/cancel`,
-    });
-
-    // Send Checkout URL
-    res.send({
-      success: true,
-      url: session.url,
-    });
-  } catch (error) {
-    console.error("Stripe Checkout Error:", error.message);
-
-    res.status(500).send({
-      message: error.message,
-    });
+      res.status(500).send({
+        success: false,
+        message: "Unable to create checkout session.",
+      });
+    }
   }
-});
+);
+
 //verify payment
-app.post("/verify-payment", async (req, res) => {
-  const { sessionId } = req.body;
 
-  const session = await stripe.checkout.sessions.retrieve(sessionId);
+app.post(
+  "/verify-payment",
+  verifyToken(usersCollection),
+  verifyVendor,
+  async (req, res) => {
+    try {
+      console.log("VERIFY PAYMENT API CALLED");
 
-  if (session.payment_status !== "paid") {
-    return res.send({ message: "Payment not completed" });
+      const { sessionId } = req.body;
+      const userId = req.user.id;
+
+      if (!sessionId) {
+        return res.status(400).send({ message: "Session ID required" });
+      }
+
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+      if (
+        session.status !== "complete" ||
+        session.payment_status !== "paid" ||
+        session.mode !== "payment" ||
+        session.metadata?.userId !== userId ||
+        session.client_reference_id !== userId
+      ) {
+        return res.status(400).send({ message: "Invalid payment" });
+      }
+
+      const items = await stripe.checkout.sessions.listLineItems(sessionId);
+
+      if (
+        items.data.length !== 1 ||
+        items.data[0].price?.id !== process.env.STRIPE_PRICE_ID ||
+        items.data[0].quantity !== 1
+      ) {
+        return res.status(400).send({ message: "Invalid payment details" });
+      }
+
+      await usersCollection.updateOne(
+        { _id: new ObjectId(userId) },
+        {
+          $set: {
+            subscriptionPlan: "premium",
+            premiumActivatedAt: new Date(),
+          },
+        }
+      );
+
+      res.send({ success: true, message: "Premium activated" });
+    } catch (error) {
+      console.error("Payment Error:", error);
+      res.status(500).send({
+        success: false,
+        message: "Verification failed",
+      });
+    }
   }
-
-  await usersCollection.updateOne(
-    { _id: new ObjectId(session.metadata.userId) },
-    { $set: { subscriptionPlan: "premium" } },
-  );
-
-  res.send({ success: true, message: "Premium activated" });
-});
-//transactions apis
+);
 
 app.get(
   "/admin-overview",

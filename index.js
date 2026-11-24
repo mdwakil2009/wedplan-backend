@@ -15,48 +15,58 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // CORS middleware
 app.use(cors());
 
-// Stripe Webhook
-app.post(
-  "/webhook",
+app.post( "/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
-    console.log("Webhook request received!");
-
     const signature = req.headers["stripe-signature"];
 
     let event;
 
-    // Verify Stripe signature
+    // Verify Stripe Signature
     try {
       event = stripe.webhooks.constructEvent(
         req.body,
         signature,
-        process.env.STRIPE_WEBHOOK_SECRET,
+        process.env.STRIPE_WEBHOOK_SECRET
       );
     } catch (error) {
       console.error("Webhook Signature Error:", error.message);
-
       return res.status(400).send("Invalid signature");
     }
 
     try {
-      // Handle successful payment
       if (event.type === "checkout.session.completed") {
         const session = event.data.object;
 
-        console.log("Checkout Session:", session.id);
-
-        if (session.payment_status !== "paid") {
+        if (
+          session.payment_status !== "paid" ||
+          session.mode !== "payment"
+        ) {
           return res.json({ received: true });
         }
 
         const userId = session.metadata?.userId;
-        console.log("Session Metadata:", session.metadata);
 
-        if (!userId || !ObjectId.isValid(userId)) {
-          console.log("Invalid User ID:", userId);
+        // Validate User ID and Session Owner
+        if (
+          !userId ||
+          !ObjectId.isValid(userId) ||
+          session.client_reference_id !== userId
+        ) {
+          return res.status(400).send("Invalid user information");
+        }
 
-          return res.status(400).send("Invalid user ID");
+        // Verify Stripe Price
+        const items = await stripe.checkout.sessions.listLineItems(
+          session.id
+        );
+
+        if (
+          items.data.length !== 1 ||
+          items.data[0].price?.id !== process.env.STRIPE_PRICE_ID ||
+          items.data[0].quantity !== 1
+        ) {
+          return res.status(400).send("Invalid payment details");
         }
 
         // Activate Premium
@@ -65,15 +75,16 @@ app.post(
           {
             $set: {
               subscriptionPlan: "premium",
+              premiumActivatedAt: new Date(),
             },
-          },
+          }
         );
 
         if (userResult.matchedCount === 0) {
-          return res.status(404).send("Vendor not found");
+          return res.status(404).send("User not found");
         }
 
-        // Save transaction
+        // Save Transaction (Prevent Duplicate)
         await transactionsCollection.updateOne(
           { stripeSessionId: session.id },
           {
@@ -88,23 +99,23 @@ app.post(
               createdAt: new Date(session.created * 1000),
             },
           },
-          { upsert: true },
+          { upsert: true }
         );
 
-        console.log("Premium activated:", userId);
+        console.log("Premium Activated:", userId);
       }
 
-      return res.json({ received: true });
+      res.json({ received: true });
     } catch (error) {
       console.error("Webhook Processing Error:", error);
-
-      return res.status(500).send("Webhook processing failed");
+      res.status(500).send("Webhook processing failed");
     }
-  },
+  }
 );
 
-// JSON middleware MUST be after webhook
+// Keep JSON middleware after Webhook
 app.use(express.json());
+
 
 const client = new MongoClient(process.env.MONGODB_URL);
 

@@ -21,6 +21,7 @@ app.use(
   }),
 );
 
+
 app.post(
   "/webhook",
   express.raw({ type: "application/json" }),
@@ -29,91 +30,56 @@ app.post(
 
     let event;
 
-    // Verify Stripe Signature
+    // 1. Verify Stripe webhook signature
     try {
       event = stripe.webhooks.constructEvent(
         req.body,
         signature,
-        process.env.STRIPE_WEBHOOK_SECRET,
+        process.env.STRIPE_WEBHOOK_SECRET
       );
     } catch (error) {
       console.error("Webhook Signature Error:", error.message);
+
       return res.status(400).send("Invalid signature");
     }
 
+    // 2. Handle checkout completion
     try {
       if (event.type === "checkout.session.completed") {
         const session = event.data.object;
 
-        if (session.payment_status !== "paid" || session.mode !== "payment") {
+        // Ignore unpaid or invalid payment mode
+        if (
+          session.payment_status !== "paid" ||
+          session.mode !== "payment"
+        ) {
           return res.json({ received: true });
         }
 
-        const userId = session.metadata?.userId;
+        // 3. Activate Premium using shared function
+        const result = await activatePremiumFromSession(session.id);
 
-        // Validate User ID and Session Owner
-        if (
-          !userId ||
-          !ObjectId.isValid(userId) ||
-          session.client_reference_id !== userId
-        ) {
-          return res.status(400).send("Invalid user information");
-        }
-
-        // Verify Stripe Price
-        const items = await stripe.checkout.sessions.listLineItems(session.id);
-
-        if (
-          items.data.length !== 1 ||
-          items.data[0].price?.id !== process.env.STRIPE_PRICE_ID ||
-          items.data[0].quantity !== 1
-        ) {
-          return res.status(400).send("Invalid payment details");
-        }
-
-        // Activate Premium
-        const userResult = await usersCollection.updateOne(
-          { _id: new ObjectId(userId) },
-          {
-            $set: {
-              subscriptionPlan: "premium",
-              premiumActivatedAt: new Date(),
-            },
-          },
-        );
-
-        if (userResult.matchedCount === 0) {
-          return res.status(404).send("User not found");
-        }
-
-        // Save Transaction (Prevent Duplicate)
-        await transactionsCollection.updateOne(
-          { stripeSessionId: session.id },
-          {
-            $setOnInsert: {
-              vendorId: userId,
-              plan: "premium",
-              amount: (session.amount_total || 0) / 100,
-              currency: session.currency,
-              stripeSessionId: session.id,
-              paymentIntentId: session.payment_intent,
-              status: "paid",
-              createdAt: new Date(session.created * 1000),
-            },
-          },
-          { upsert: true },
-        );
-
-        console.log("Premium Activated:", userId);
+        console.log("Premium Activated Successfully:", {
+          userId: result.userId,
+          sessionId: session.id,
+          subscriptionPlan: result.subscriptionPlan,
+        });
       }
 
-      res.json({ received: true });
+      // 4. Acknowledge Stripe event
+      return res.status(200).json({
+        received: true,
+        success: true,
+      });
     } catch (error) {
       console.error("Webhook Processing Error:", error);
-      res.status(500).send("Webhook processing failed");
+
+      // Return 500 so Stripe can retry the webhook
+      return res.status(500).send("Webhook processing failed");
     }
-  },
+  }
 );
+
 
 // Keep JSON middleware after Webhook
 app.use(express.json());
@@ -1030,6 +996,7 @@ app.delete(
 );
 
 // Create Stripe Checkout Session - Secure
+
 app.post(
   "/create-checkout-session",
   verifyToken(usersCollection),
@@ -1037,7 +1004,8 @@ app.post(
   async (req, res) => {
     try {
       const userId = req.user.id;
-      if (!ObjectId.isValid(userId)) {
+
+      if (!userId || !ObjectId.isValid(userId)) {
         return res.status(400).send({
           success: false,
           message: "Invalid user ID.",
@@ -1061,10 +1029,18 @@ app.post(
           message: "You are already a Premium user.",
         });
       }
+
       if (!process.env.STRIPE_PRICE_ID) {
         return res.status(500).send({
           success: false,
           message: "Stripe Price ID is not configured.",
+        });
+      }
+
+      if (!process.env.CLIENT_URL) {
+        return res.status(500).send({
+          success: false,
+          message: "Client URL is not configured.",
         });
       }
 
@@ -1079,11 +1055,10 @@ app.post(
         ],
 
         customer_email: user.email,
-
         client_reference_id: userId,
 
         metadata: {
-          userId: userId,
+          userId,
         },
 
         success_url: `${process.env.CLIENT_URL}/dashboard/vendor/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
@@ -1091,20 +1066,21 @@ app.post(
         cancel_url: `${process.env.CLIENT_URL}/dashboard/vendor/subscription/cancel`,
       });
 
-      res.send({
+      return res.send({
         success: true,
         url: session.url,
       });
     } catch (error) {
-      console.error("Stripe Checkout Error:", error.message);
+      console.error("Stripe Checkout Error:", error);
 
-      res.status(500).send({
+      return res.status(500).send({
         success: false,
         message: "Unable to create checkout session.",
       });
     }
-  },
+  }
 );
+
 
 //verify payment
 
@@ -1114,55 +1090,154 @@ app.post(
   verifyVendor,
   async (req, res) => {
     try {
-      console.log("VERIFY PAYMENT API CALLED");
-
       const { sessionId } = req.body;
       const userId = req.user.id;
 
       if (!sessionId) {
-        return res.status(400).send({ message: "Session ID required" });
+        return res.status(400).send({
+          success: false,
+          message: "Session ID is required.",
+        });
       }
 
-      const session = await stripe.checkout.sessions.retrieve(sessionId);
-
-      if (
-        session.status !== "complete" ||
-        session.payment_status !== "paid" ||
-        session.mode !== "payment" ||
-        session.metadata?.userId !== userId ||
-        session.client_reference_id !== userId
-      ) {
-        return res.status(400).send({ message: "Invalid payment" });
+      if (!userId || !ObjectId.isValid(userId)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid user ID.",
+        });
       }
 
-      const items = await stripe.checkout.sessions.listLineItems(sessionId);
+      const result = await activatePremiumFromSession(
+        sessionId,
+        userId
+      );
 
-      if (
-        items.data.length !== 1 ||
-        items.data[0].price?.id !== process.env.STRIPE_PRICE_ID ||
-        items.data[0].quantity !== 1
-      ) {
-        return res.status(400).send({ message: "Invalid payment details" });
-      }
-
-      // Payment verified successfully
-      // Premium activation is handled by Stripe webhook
-
-      res.send({
+      return res.send({
         success: true,
         paymentVerified: true,
-        premiumActivated: false,
-        message: "Payment verified. Premium activation is being processed.",
+        premiumActivated: true,
+        subscriptionPlan: result.subscriptionPlan,
+        message: "Payment verified and Premium activated successfully.",
       });
     } catch (error) {
-      console.error("Payment Error:", error);
-      res.status(500).send({
+      console.error("Payment Verification Error:", error);
+
+      return res.status(400).send({
         success: false,
-        message: "Verification failed",
+        paymentVerified: false,
+        premiumActivated: false,
+        message: error.message || "Payment verification failed.",
       });
     }
-  },
+  }
 );
+
+const activatePremiumFromSession = async (sessionId, expectedUserId = null) => {
+
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+  if (
+    session.status !== "complete" ||
+    session.payment_status !== "paid" ||
+    session.mode !== "payment"
+  ) {
+    throw new Error("Payment is not completed.");
+  }
+
+  const userId = session.metadata?.userId;
+
+  if (
+    !userId ||
+    !ObjectId.isValid(userId) ||
+    session.client_reference_id !== userId
+  ) {
+    throw new Error("Invalid user information in Stripe session.");
+  }
+
+ 
+  if (expectedUserId && userId !== expectedUserId) {
+    throw new Error("Payment session does not belong to this user.");
+  }
+
+  if (!process.env.STRIPE_PRICE_ID) {
+    throw new Error("Stripe Price ID is not configured.");
+  }
+
+
+  const items = await stripe.checkout.sessions.listLineItems(session.id);
+
+  if (
+    items.data.length !== 1 ||
+    items.data[0].price?.id !== process.env.STRIPE_PRICE_ID ||
+    items.data[0].quantity !== 1
+  ) {
+    throw new Error("Invalid payment details.");
+  }
+
+  const objectId = new ObjectId(userId);
+
+
+  const userResult = await usersCollection.updateOne(
+    {
+      _id: objectId,
+      subscriptionPlan: { $ne: "premium" },
+    },
+    {
+      $set: {
+        subscriptionPlan: "premium",
+        premiumActivatedAt: new Date(),
+      },
+    }
+  );
+
+  
+  const user = await usersCollection.findOne(
+    { _id: objectId },
+    { projection: { _id: 1, subscriptionPlan: 1 } }
+  );
+
+  if (!user) {
+    throw new Error("User not found in database.");
+  }
+
+  if (user.subscriptionPlan !== "premium") {
+    throw new Error("Premium activation failed.");
+  }
+
+  const paymentIntentId =
+    typeof session.payment_intent === "string"
+      ? session.payment_intent
+      : session.payment_intent?.id || null;
+
+  await transactionsCollection.updateOne(
+    { stripeSessionId: session.id },
+    {
+      $setOnInsert: {
+        vendorId: userId,
+        plan: "premium",
+        amount: (session.amount_total || 0) / 100,
+        currency: session.currency,
+        stripeSessionId: session.id,
+        paymentIntentId,
+        status: "paid",
+        createdAt: new Date(session.created * 1000),
+      },
+    },
+    { upsert: true }
+  );
+
+  console.log(
+    "Premium activation confirmed:",
+    userId,
+    "Already premium:",
+    userResult.matchedCount === 0
+  );
+
+  return {
+    userId,
+    subscriptionPlan: user.subscriptionPlan,
+  };
+};
 
 app.get(
   "/admin-transactions",

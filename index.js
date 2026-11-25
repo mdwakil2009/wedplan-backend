@@ -630,6 +630,8 @@ app.patch(
 
 // Get User Info
 
+
+// Get User Info API
 app.get("/users/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -642,16 +644,19 @@ app.get("/users/:id", async (req, res) => {
       });
     }
 
+    // Find User
     const user = await usersCollection.findOne(
       { _id: new ObjectId(id) },
       {
         projection: {
           name: 1,
           image: 1,
+          subscriptionPlan: 1,
         },
       },
     );
 
+    // Check User Exists
     if (!user) {
       return res.status(404).send({
         success: false,
@@ -659,6 +664,7 @@ app.get("/users/:id", async (req, res) => {
       });
     }
 
+    // Send User Data
     res.send({
       success: true,
       user,
@@ -672,6 +678,7 @@ app.get("/users/:id", async (req, res) => {
     });
   }
 });
+
 
 // Customer Bookings API - Secure
 app.get(
@@ -978,6 +985,50 @@ app.patch(
   },
 );
 
+// Admin - Delete Service
+app.delete(
+  "/admin-services/:id",
+  verifyToken(usersCollection),
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      // Validate Service ID
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid service ID",
+        });
+      }
+
+      // Delete Service
+      const result = await servicesCollection.deleteOne({
+        _id: new ObjectId(id),
+      });
+
+      if (result.deletedCount === 0) {
+        return res.status(404).send({
+          success: false,
+          message: "Service not found",
+        });
+      }
+
+      res.send({
+        success: true,
+        message: "Service deleted successfully!",
+      });
+    } catch (error) {
+      console.error("Admin Delete Service Error:", error);
+
+      res.status(500).send({
+        success: false,
+        message: "Failed to delete service",
+      });
+    }
+  },
+);
+
 // Create Stripe Checkout Session - Secure
 app.post(
   "/create-checkout-session",
@@ -1142,9 +1193,6 @@ app.get(
   },
 );
 
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-});
 // Get logged-in vendor subscription status
 app.get(
   "/my-subscription",
@@ -1153,7 +1201,7 @@ app.get(
   async (req, res) => {
     try {
       const userId = req.user.id;
-
+      
       const user = await usersCollection.findOne(
         { _id: new ObjectId(userId) },
         {
@@ -1163,14 +1211,14 @@ app.get(
           },
         },
       );
-
+      
       if (!user) {
         return res.status(404).send({
           success: false,
           message: "User not found",
         });
       }
-
+      
       res.send({
         success: true,
         subscriptionPlan: user.subscriptionPlan || "free",
@@ -1179,11 +1227,47 @@ app.get(
       });
     } catch (error) {
       console.error("Subscription Status Error:", error);
-
+      
       res.status(500).send({
         success: false,
         message: "Failed to get subscription status",
       });
     }
   },
-);
+);app.get("/featured-services", async (req, res) => {
+  try {
+    const services = await db.collection("services").find({
+      status: "approved",
+      isActive: true,
+    }).sort({ createdAt: -1 }).limit(6).toArray();
+
+    const featuredServices = await Promise.all(
+      services.map(async (service) => {
+        const vendor = await db.collection("user").findOne({
+          _id: new ObjectId(service.vendorId),
+        });
+
+        return {
+          ...service,
+          userEmail: vendor?.email || "",
+          vendor: vendor
+            ? {
+                name: vendor.name,
+                email: vendor.email,
+                image: vendor.image,
+              }
+            : null,
+        };
+      })
+    );
+
+    res.send(featuredServices);
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ message: "Failed to fetch services" });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ Server running on http://localhost:${PORT}`);
+});

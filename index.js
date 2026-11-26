@@ -405,7 +405,7 @@ app.get("/services/:id", async (req, res) => {
           email: 1,
           image: 1,
         },
-      }
+      },
     );
 
     return res.send({
@@ -428,23 +428,25 @@ app.get("/services/:id", async (req, res) => {
   }
 });
 
-// Create Booking API - Secure
 app.post("/bookings", verifyToken(usersCollection), async (req, res) => {
   try {
-    // Only customers can create bookings
-    if (req.user.role !== "customer") {
+    // 1. Check logged-in user
+    if (!req.user || req.user.role !== "customer") {
       return res.status(403).send({
         success: false,
         message: "Only customers can book services.",
       });
     }
 
-    const { serviceId, eventDate, eventLocation, message } = req.body;
+    // 2. Get booking information
+    const { serviceId, eventDate, eventLocation, message } = req.body || {};
 
-    // Validate required fields
+    // 3. Validate required fields
     if (
-      !serviceId ||
-      !eventDate ||
+      typeof serviceId !== "string" ||
+      !serviceId.trim() ||
+      typeof eventDate !== "string" ||
+      !eventDate.trim() ||
       typeof eventLocation !== "string" ||
       !eventLocation.trim()
     ) {
@@ -454,35 +456,87 @@ app.post("/bookings", verifyToken(usersCollection), async (req, res) => {
       });
     }
 
-    // Validate Service ID
-    if (!ObjectId.isValid(serviceId)) {
+    const cleanServiceId = serviceId.trim();
+    const cleanEventDate = eventDate.trim();
+
+    // 4. Validate MongoDB Service ID
+    if (!ObjectId.isValid(cleanServiceId)) {
       return res.status(400).send({
         success: false,
         message: "Invalid service ID.",
       });
     }
 
-    // Get service from database
-    const service = await servicesCollection.findOne({
-      _id: new ObjectId(serviceId),
-    });
-
-    // Check service availability
-    if (!service || !service.isActive || service.status !== "approved") {
-      return res.status(404).send({
+    // 5. Validate date format
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanEventDate)) {
+      return res.status(400).send({
         success: false,
-        message: "Service is not available.",
+        message: "Please select a valid event date.",
       });
     }
 
-    // Check duplicate booking
-    const existingBooking = await bookingsCollection.findOne({
-      customerId: req.user.id,
-      serviceId: service._id.toString(),
-      eventDate,
-      status: { $in: ["pending", "accepted"] },
+    // 6. Validate actual calendar date
+    const [year, month, day] = cleanEventDate.split("-").map(Number);
+
+    const validDate = new Date(Date.UTC(year, month - 1, day));
+
+    if (
+      validDate.getUTCFullYear() !== year ||
+      validDate.getUTCMonth() !== month - 1 ||
+      validDate.getUTCDate() !== day
+    ) {
+      return res.status(400).send({
+        success: false,
+        message: "Please select a valid event date.",
+      });
+    }
+
+    // 7. Get today's date in Bangladesh local timezone
+    const today = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Dhaka",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+
+    // 8. Check past date
+    if (cleanEventDate < today) {
+      return res.status(400).send({
+        success: false,
+        message: "Event date must be today or a future date.",
+      });
+    }
+
+    // 9. Get authenticated customer ID
+    const customerId = String(req.user.id);
+
+    // 10. Find available service
+    const service = await servicesCollection.findOne({
+      _id: new ObjectId(cleanServiceId),
+      status: "approved",
+      isActive: true,
     });
 
+    if (!service) {
+      return res.status(404).send({
+        success: false,
+        message: "This service is not available.",
+      });
+    }
+
+    // 11. Prevent vendor from booking own service
+    if (String(service.vendorId) === customerId) {
+      return res.status(403).send({
+        success: false,
+        message: "You cannot book your own service.",
+      });
+    }
+
+    // 12. Check duplicate booking for same service and date
+    const existingBooking = await bookingsCollection.findOne({
+      customerId,
+      serviceId: service._id.toString(),
+    });
     if (existingBooking) {
       return res.status(409).send({
         success: false,
@@ -490,31 +544,39 @@ app.post("/bookings", verifyToken(usersCollection), async (req, res) => {
       });
     }
 
-    // Create secure booking data
+    // 13. Prepare booking data
     const bookingData = {
       serviceId: service._id.toString(),
-      customerId: req.user.id,
-      vendorId: service.vendorId,
-      eventDate,
+      customerId,
+      vendorId: String(service.vendorId),
+      eventDate: cleanEventDate,
       eventLocation: eventLocation.trim(),
       message: typeof message === "string" ? message.trim() : "",
       status: "pending",
       createdAt: new Date(),
     };
 
+    // 14. Save booking
     const result = await bookingsCollection.insertOne(bookingData);
 
-    res.send({
+    return res.status(201).send({
       success: true,
-      message: "Booking successful!",
+      message: "Your booking request has been sent successfully.",
       insertedId: result.insertedId,
     });
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).send({
+        success: false,
+        message: "You have already booked this service for this date.",
+      });
+    }
+
     console.error("Booking Error:", error);
 
-    res.status(500).send({
+    return res.status(500).send({
       success: false,
-      message: "Failed to create booking.",
+      message: "Failed to create booking. Please try again.",
     });
   }
 });

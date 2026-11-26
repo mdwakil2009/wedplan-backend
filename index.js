@@ -21,42 +21,39 @@ app.use(
   }),
 );
 
-
 app.post(
   "/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
     const signature = req.headers["stripe-signature"];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+    if (!webhookSecret || !signature) {
+      return res.status(400).send("Missing webhook configuration");
+    }
 
     let event;
 
-    // 1. Verify Stripe webhook signature
+    // Verify Stripe webhook signature
     try {
       event = stripe.webhooks.constructEvent(
         req.body,
         signature,
-        process.env.STRIPE_WEBHOOK_SECRET
+        webhookSecret,
       );
     } catch (error) {
       console.error("Webhook Signature Error:", error.message);
-
       return res.status(400).send("Invalid signature");
     }
 
-    // 2. Handle checkout completion
     try {
       if (event.type === "checkout.session.completed") {
         const session = event.data.object;
 
-        // Ignore unpaid or invalid payment mode
-        if (
-          session.payment_status !== "paid" ||
-          session.mode !== "payment"
-        ) {
-          return res.json({ received: true });
+        if (session.payment_status !== "paid" || session.mode !== "payment") {
+          return res.status(200).json({ received: true });
         }
 
-        // 3. Activate Premium using shared function
         const result = await activatePremiumFromSession(session.id);
 
         console.log("Premium Activated Successfully:", {
@@ -66,7 +63,6 @@ app.post(
         });
       }
 
-      // 4. Acknowledge Stripe event
       return res.status(200).json({
         received: true,
         success: true,
@@ -74,12 +70,13 @@ app.post(
     } catch (error) {
       console.error("Webhook Processing Error:", error);
 
-      // Return 500 so Stripe can retry the webhook
-      return res.status(500).send("Webhook processing failed");
+      return res.status(500).json({
+        received: false,
+        message: "Webhook processing failed",
+      });
     }
-  }
+  },
 );
-
 
 // Keep JSON middleware after Webhook
 app.use(express.json());
@@ -98,10 +95,9 @@ export async function connectToMongoDB() {
 
 const connectedClient = await connectToMongoDB();
 const db = connectedClient.db("WedPlan");
-
+const usersCollection = db.collection("user");
 const servicesCollection = db.collection("services");
 const bookingsCollection = db.collection("bookings");
-const usersCollection = db.collection("user");
 const transactionsCollection = db.collection("transactions");
 // Prevent duplicate Stripe transactions
 await transactionsCollection.createIndex(
@@ -373,7 +369,6 @@ app.delete(
     }
   },
 );
-// Get Single Approved & Active Service
 app.get("/services/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -398,11 +393,35 @@ app.get("/services/:id", async (req, res) => {
       });
     }
 
-    res.send(service);
+    // Find vendor using vendorId
+    const vendor = await usersCollection.findOne(
+      {
+        _id: new ObjectId(service.vendorId),
+        role: "vendor",
+      },
+      {
+        projection: {
+          name: 1,
+          email: 1,
+          image: 1,
+        },
+      }
+    );
+
+    return res.send({
+      ...service,
+      vendor: vendor
+        ? {
+            name: vendor.name,
+            email: vendor.email,
+            image: vendor.image,
+          }
+        : null,
+    });
   } catch (error) {
     console.error("Get Single Service Error:", error);
 
-    res.status(500).send({
+    return res.status(500).send({
       success: false,
       message: "Failed to fetch service",
     });
@@ -596,7 +615,6 @@ app.patch(
 
 // Get User Info
 
-
 // Get User Info API
 app.get("/users/:id", async (req, res) => {
   try {
@@ -644,7 +662,6 @@ app.get("/users/:id", async (req, res) => {
     });
   }
 });
-
 
 // Customer Bookings API - Secure
 app.get(
@@ -1078,9 +1095,8 @@ app.post(
         message: "Unable to create checkout session.",
       });
     }
-  }
+  },
 );
-
 
 //verify payment
 
@@ -1107,10 +1123,7 @@ app.post(
         });
       }
 
-      const result = await activatePremiumFromSession(
-        sessionId,
-        userId
-      );
+      const result = await activatePremiumFromSession(sessionId, userId);
 
       return res.send({
         success: true,
@@ -1129,11 +1142,10 @@ app.post(
         message: error.message || "Payment verification failed.",
       });
     }
-  }
+  },
 );
 
 const activatePremiumFromSession = async (sessionId, expectedUserId = null) => {
-
   const session = await stripe.checkout.sessions.retrieve(sessionId);
 
   if (
@@ -1154,7 +1166,6 @@ const activatePremiumFromSession = async (sessionId, expectedUserId = null) => {
     throw new Error("Invalid user information in Stripe session.");
   }
 
- 
   if (expectedUserId && userId !== expectedUserId) {
     throw new Error("Payment session does not belong to this user.");
   }
@@ -1162,7 +1173,6 @@ const activatePremiumFromSession = async (sessionId, expectedUserId = null) => {
   if (!process.env.STRIPE_PRICE_ID) {
     throw new Error("Stripe Price ID is not configured.");
   }
-
 
   const items = await stripe.checkout.sessions.listLineItems(session.id);
 
@@ -1176,7 +1186,6 @@ const activatePremiumFromSession = async (sessionId, expectedUserId = null) => {
 
   const objectId = new ObjectId(userId);
 
-
   const userResult = await usersCollection.updateOne(
     {
       _id: objectId,
@@ -1187,13 +1196,12 @@ const activatePremiumFromSession = async (sessionId, expectedUserId = null) => {
         subscriptionPlan: "premium",
         premiumActivatedAt: new Date(),
       },
-    }
+    },
   );
 
-  
   const user = await usersCollection.findOne(
     { _id: objectId },
-    { projection: { _id: 1, subscriptionPlan: 1 } }
+    { projection: { _id: 1, subscriptionPlan: 1 } },
   );
 
   if (!user) {
@@ -1223,14 +1231,14 @@ const activatePremiumFromSession = async (sessionId, expectedUserId = null) => {
         createdAt: new Date(session.created * 1000),
       },
     },
-    { upsert: true }
+    { upsert: true },
   );
 
   console.log(
     "Premium activation confirmed:",
     userId,
     "Already premium:",
-    userResult.matchedCount === 0
+    userResult.matchedCount === 0,
   );
 
   return {
@@ -1276,7 +1284,7 @@ app.get(
   async (req, res) => {
     try {
       const userId = req.user.id;
-      
+
       const user = await usersCollection.findOne(
         { _id: new ObjectId(userId) },
         {
@@ -1286,14 +1294,14 @@ app.get(
           },
         },
       );
-      
+
       if (!user) {
         return res.status(404).send({
           success: false,
           message: "User not found",
         });
       }
-      
+
       res.send({
         success: true,
         subscriptionPlan: user.subscriptionPlan || "free",
@@ -1302,19 +1310,25 @@ app.get(
       });
     } catch (error) {
       console.error("Subscription Status Error:", error);
-      
+
       res.status(500).send({
         success: false,
         message: "Failed to get subscription status",
       });
     }
   },
-);app.get("/featured-services", async (req, res) => {
+);
+app.get("/featured-services", async (req, res) => {
   try {
-    const services = await db.collection("services").find({
-      status: "approved",
-      isActive: true,
-    }).sort({ createdAt: -1 }).limit(6).toArray();
+    const services = await db
+      .collection("services")
+      .find({
+        status: "approved",
+        isActive: true,
+      })
+      .sort({ createdAt: -1 })
+      .limit(6)
+      .toArray();
 
     const featuredServices = await Promise.all(
       services.map(async (service) => {
@@ -1333,7 +1347,7 @@ app.get(
               }
             : null,
         };
-      })
+      }),
     );
 
     res.send(featuredServices);

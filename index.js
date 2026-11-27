@@ -891,84 +891,64 @@ app.patch(
   },
 );
 
-// Admin - Get All Services
+// Admin - Get All Services With Vendor Information
 app.get(
   "/admin-services",
   verifyToken(usersCollection),
   verifyAdmin,
   async (req, res) => {
     try {
-      const services = await servicesCollection.find({}).toArray();
+      const services = await servicesCollection
+        .find({})
+        .sort({ createdAt: -1 })
+        .toArray();
 
-      res.status(200).send(services);
-    } catch (error) {
-      console.error("Admin services error:", error);
-      res.status(500).send({
-        message: "Failed to fetch admin services",
-      });
-    }
-  },
-);
-// Admin - Update Service Status
+      const servicesWithVendor = await Promise.all(
+        services.map(async (service) => {
+          let vendor = null;
 
-app.patch(
-  "/admin-services/:id/status",
-  verifyToken(usersCollection),
-  verifyAdmin,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { status } = req.body;
+          if (
+            service.vendorId &&
+            ObjectId.isValid(String(service.vendorId))
+          ) {
+            vendor = await usersCollection.findOne(
+              {
+                _id: new ObjectId(String(service.vendorId)),
+                role: "vendor",
+              },
+              {
+                projection: {
+                  name: 1,
+                  email: 1,
+                  image: 1,
+                },
+              }
+            );
+          }
 
-      // Validate Service ID
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).send({
-          success: false,
-          message: "Invalid service ID",
-        });
-      }
-
-      // Validate Status
-      if (!["pending", "approved", "rejected"].includes(status)) {
-        return res.status(400).send({
-          success: false,
-          message: "Invalid status",
-        });
-      }
-
-      const updateData = { status };
-
-      // Rejected service automatically inactive
-      if (status === "rejected") {
-        updateData.isActive = false;
-      }
-
-      // Update Service
-      const result = await servicesCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: updateData },
+          return {
+            ...service,
+            vendor: vendor
+              ? {
+                  name: vendor.name || "Unknown Vendor",
+                  email: vendor.email || "",
+                  image: vendor.image || "",
+                }
+              : null,
+          };
+        })
       );
 
-      if (result.matchedCount === 0) {
-        return res.status(404).send({
-          success: false,
-          message: "Service not found",
-        });
-      }
-
-      res.send({
-        success: true,
-        message: "Service status updated successfully",
-      });
+      res.status(200).send(servicesWithVendor);
     } catch (error) {
-      console.error("Update Service Status Error:", error);
+      console.error("Admin Services Error:", error);
 
       res.status(500).send({
         success: false,
-        message: "Failed to update service status",
+        message: "Failed to fetch admin services",
       });
     }
-  },
+  }
 );
 
 // Admin - Update Service Active Status
@@ -1422,3 +1402,4 @@ app.get("/featured-services", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
+export default app;

@@ -36,7 +36,7 @@ The application is built with Next.js, TypeScript, Express.js, MongoDB, Better A
 | Resource | Link |
 |---|---|
 | Live Website | https://wedplan-brown.vercel.app/ |
-| Backend API Documentation | https://wedplan-backend-lime.vercel.app/docs |
+| Backend API Documentation | https://wedplan-backend-lime.vercel.app/ |
 | Client Repository | YOUR_CLIENT_GITHUB_REPOSITORY_URL |
 | Server Repository | YOUR_SERVER_GITHUB_REPOSITORY_URL |
 

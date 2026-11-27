@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://wedplan-brown.vercel.app/">🌐 Live Website</a> •
-  <a href="https://wedplan-backend-lime.vercel.app/docs">📚 Backend API Documentation</a>
+  <a href="https://wedplan-backend-lime.vercel.app/">📚 Backend API Documentation</a>
 </p>
 
 ---

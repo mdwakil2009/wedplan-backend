@@ -907,14 +907,20 @@ app.get(
         services.map(async (service) => {
           let vendor = null;
 
-          if (
-            service.vendorId &&
-            ObjectId.isValid(String(service.vendorId))
-          ) {
+          if (service.vendorId) {
+            const vendorId = String(service.vendorId);
+
+            const idQuery = [{ _id: vendorId }];
+
+            if (ObjectId.isValid(vendorId)) {
+              idQuery.push({
+                _id: new ObjectId(vendorId),
+              });
+            }
+
             vendor = await usersCollection.findOne(
               {
-                _id: new ObjectId(String(service.vendorId)),
-                role: "vendor",
+                $or: idQuery,
               },
               {
                 projection: {
